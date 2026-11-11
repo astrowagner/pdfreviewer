@@ -1,0 +1,6 @@
+@diffusionstudio/piper-wasm 1.0.0 declares the MIT license in its package.json and ships no license text.
+Its WebAssembly module contains espeak-ng (rhasspy fork), which is GPL-3.0-or-later (see GPL-3.0.txt), and
+piper-phonemize, which is MIT. Sources:
+  https://github.com/diffusion-studio/piper-wasm
+  https://github.com/rhasspy/espeak-ng
+  https://github.com/rhasspy/piper-phonemize
