@@ -250,6 +250,9 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .vrow[aria-checked=true] .vname::before { content: "● "; }
 .vrow.toc.lvl2 .vname { padding-left: 14px; font-size: 14.5px; }
 .vrow.toc.here .vname { color: var(--accent); font-weight: 700; }
+.toc-more { padding: 8px 4px 10px; border-bottom: 1px solid var(--line); }
+.vrow.toc.toc-sub .vname { padding-left: 22px; }
+.vrow[hidden] { display: none; }
 .vrow mark { background: var(--h-note); color: inherit; border-radius: 2px; }
 .ncard { display: grid; gap: 6px; padding: 12px 12px 12px 14px; border: 1px solid var(--line); border-left: 4px solid var(--tc); border-radius: 12px; background: var(--paper); }
 .ncard .nhead { display: flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 750; color: var(--tc); }
@@ -1120,7 +1123,7 @@ this.workerSrc)).WorkerMessageHandler})())}}class WorkerTransport{downloadInfoCa
 // Everything here runs locally in the browser.
 // ───────────────────────────────────────────────────────────────────────────
 
-const PARSER_VERSION = 4;
+const PARSER_VERSION = 5;
 const SUP_O = '', SUP_C = '', SUB_O = '', SUB_C = '';
 const MARKS_RE = /[-]/g;
 const stripMarks = (s) => s.replace(MARKS_RE, '');
@@ -1208,7 +1211,7 @@ function finalizeLine(L, page) {
   let mainH = 0, by = L.by;
   for (const it of L.items) if (it.s.trim() && it.h > mainH) { mainH = it.h; by = it.y; }
   if (!mainH) mainH = L.h || 1;
-  let text = '', open = null, prevEnd = null, wideGaps = 0, x0 = Infinity, rotChars = 0, chars = 0;
+  let text = '', open = null, prevEnd = null, wideGaps = 0, x0 = Infinity, rotChars = 0, chars = 0, wideSpace = false;
   const segs = [];
   const closeOpen = () => { if (open === 'sup') text += SUP_C; else if (open === 'sub') text += SUB_C; open = null; };
   for (const it of L.items) {
@@ -1216,6 +1219,7 @@ function finalizeLine(L, page) {
     if (isSpace) {
       closeOpen();
       if (text && !/\s$/.test(text)) text += ' ';
+      if (it.w > 1.6 * mainH) wideSpace = true;      // pdf.js fills a column gap with one wide space item
       prevEnd = Math.max(prevEnd ?? it.x, it.x + it.w);
       continue;
     }
@@ -1226,7 +1230,7 @@ function finalizeLine(L, page) {
     }
     if (prevEnd !== null && text) {
       const gap = it.x - prevEnd;
-      if (gap > 1.6 * mainH) wideGaps++;
+      if (gap > 1.6 * mainH || wideSpace) wideGaps++;
       const needSpace = !/\s$/.test(text.replace(MARKS_RE, '')) && !/^\s/.test(it.s);
       if (needSpace && kind === 'n' && gap > 0.14 * Math.max(it.h, 0.5 * mainH)) { closeOpen(); text += ' '; }
     }
@@ -1240,6 +1244,7 @@ function finalizeLine(L, page) {
     segs.push({ t0, t1: text.length, n: s.length, page: page.n, x: it.x, y: it.y, w: it.w, h: it.h, asc: it.asc, desc: it.desc, rot: it.rot });
     x0 = Math.min(x0, it.x);
     prevEnd = it.x + it.w;
+    wideSpace = false;
     chars += s.length; if (it.rot) rotChars += s.length;
   }
   closeOpen();
@@ -1332,7 +1337,12 @@ function buildBlocks(pagesLines, metrics) {
         if (col.colOf(A) === col.colOf(L)) brk = true;
         else brk = endsSentence(A.text) && (indented(L) || isShort(A));
       } else if (dy > 1.45 * gap * Math.max(1, scale)) brk = true;
+      // A caption or a sentence right above table rows, or a paragraph right below them, set in the same size.
+      else if (L.wideGaps >= 2 && !A.wideGaps && (CAP_LABEL.test(stripMarks(B.lines[0].text).trim()) || endsSentence(A.text))) brk = true;
+      else if (A.wideGaps >= 2 && !L.wideGaps && proseLine(L.text)) brk = true;
       else if (BULLET_RE.test(stripMarks(L.text))) brk = true;
+      // A caption starting right under figure text set in the same size ("Figure 2: …" after a legend line).
+      else if (strictCaptionLine(stripMarks(L.text).trim()) && (endsSentence(A.text) || (isShort(A) && !proseLine(A.text)))) brk = true;
       else if (B.lines.length === 1 && headingLike(A) && isShort(A)) brk = true;
       else if (!bigText && indented(L) && !(indented(A) && Math.abs(L.x0 - A.x0) < 2) && !(inBullet && L.x0 > B.lines[0].x0 + 0.3 * body)) brk = true;
       else if (!bigText && isShort(A) && endsSentence(A.text)) brk = true;
@@ -1352,6 +1362,10 @@ function isNumericToken(tok) {
 }
 function isHeadingText(t, nLines, ratio) {
   if (!t || t.length > 140 || nLines > 3) return false;
+  // Form questions ("Question 3 : …", "1. Is this a resubmission?", long questions) are not section titles;
+  // short ones such as "1.2 Why the mid-infrared?" can be.
+  if (QUESTION_START.test(t) || (ENDS_Q.test(t) && (t.length > 70 || BULLET_RE.test(t)))) return false;
+  if (/(\.\s?){4,}\d{1,4}$|…\s*\d{1,4}$/.test(t)) return false;          // a contents line with dot leaders
   const words = t.split(/\s+/).length;
   const endsPunct = /[.;,:]$/.test(t);
   const big = ratio >= 1.12;
@@ -1364,39 +1378,136 @@ function isHeadingText(t, nLines, ratio) {
 }
 const REF_HEAD = /^((\d+(\.\d+)*\.?|[IVX]+\.)\s*)?(references( cited)?|bibliography|literature cited|works cited|cited references)\s*$/i;
 
+// Words that make text read as language rather than as labels, cells or ticks.
+const FUNC_WORDS = new Set(('a an the of and or nor but to in on at by for from with without within into onto upon over under between among ' +
+  'about across around along through during after before since until than then as is are was were be been being am this that these those ' +
+  'it its we our us they their them which who whom whose what how why where when whether if will would can could may might shall should ' +
+  'must has have had do does did not no also such each per via both all any some more most other only very').split(' '));
+const bareWord = (tok) => tok.toLowerCase().replace(/^[^\p{L}]+|[^\p{L}]+$/gu, '');
+const WORD_TOK = /^[("'“‘\[]*\p{L}[\p{L}\p{M}'’-]*[)\]"'”’.,;:!?]*$/u;
+const FORM_LINE = /^\p{L}[\p{L}\p{N} ()\/&.,'’#-]{0,48}:(\s|$)/u;      // "Proposal Title: …", "Answer: No", "Question 1 : …"
+const QUESTION_START = /^(question|q)\s*\d+\b/i;
+const ENDS_Q = /\?["'”’)\]]*$/;
+const CAP_LABEL = /^(fig(ure)?s?\.?|tables?|tab\.|plate|exhibit)\s*[A-Z]?\d+[a-z]?(?=$|[\s.:|—–-])/i;
+const capPunct = (rest) => /^\s*[.:|—]/.test(rest) || /^\s+[–-]\s/.test(rest);    // "Figure 1:", "Fig. 1.", "Figure 1 |", "Table 2 – "
+function captionStart(t, ratio) {
+  const m = CAP_LABEL.exec(t);
+  if (!m) return false;
+  const rest = t.slice(m[0].length);
+  if (!rest.trim()) return true;                                  // the label on its own ("Figure 1"); the text follows
+  if (capPunct(rest)) return true;
+  return ratio <= 0.95 && /^\s+[\p{Lu}(\[]/u.test(rest);          // "Figure 1 Predicted …" set smaller than body text
+}
+const strictCaptionLine = (t) => { const m = CAP_LABEL.exec(t); return !!m && capPunct(t.slice(m[0].length)); };
+const proseLine = (t) => { const toks = stripMarks(t).trim().split(/\s+/); return toks.length >= 7 || toks.filter((x) => FUNC_WORDS.has(bareWord(x))).length >= 2; };
+
+function blockFeatures(B, body) {
+  const t = stripMarks(B.text).trim();
+  const n = B.lines.length;
+  const ratio = B.lines.reduce((s, L) => s + L.h, 0) / n / body;
+  const rotFrac = B.lines.reduce((s, L) => s + L.rotFrac, 0) / n;
+  const tokens = t.split(/\s+/).filter(Boolean);
+  const nt = tokens.length;
+  const numTok = tokens.filter(isNumericToken).length;
+  const words = tokens.filter((x) => WORD_TOK.test(x)).length;
+  const fw = tokens.filter((x) => FUNC_WORDS.has(bareWord(x))).length;
+  const wide = B.lines.reduce((s, L) => s + L.wideGaps, 0) / n;
+  const formLines = B.lines.filter((L) => { const x = stripMarks(L.text).trim(); return FORM_LINE.test(x) || QUESTION_START.test(x) || ENDS_Q.test(x); }).length;
+  const form = FORM_LINE.test(t) || QUESTION_START.test(t) || ENDS_Q.test(t) || formLines >= 0.5 * n;
+  const sentEnd = /[.!?]["'”’)\]]*$/.test(t);
+  const prose = (nt >= 6 && words >= 0.6 * nt && fw >= 2 && fw >= 0.1 * nt) || (sentEnd && words >= 4 && fw >= 1);
+  return { t, n, ratio, rotFrac, nt, numTok, words, fw, wide, form, prose, chars: t.length };
+}
+// Text that is never treated as figure text unless it is rotated: form rows, questions, sentences, list items, addresses.
+const isProtected = (f) => f.form || f.prose || endsSentence(f.t) || BULLET_RE.test(f.t) || /@|https?:|www\./i.test(f.t);
+const isSingleNumber = (f) => f.n === 1 && f.chars < 25 && f.nt >= 1 && f.numTok === f.nt;
+
 function classify(blocks, metrics, pages) {
   const body = metrics.body;
   for (const B of blocks) {
-    const t = stripMarks(B.text).trim();
-    const n = B.lines.length;
-    const avgH = B.lines.reduce((s, L) => s + L.h, 0) / n;
-    const ratio = avgH / body;
-    const rotFrac = B.lines.reduce((s, L) => s + L.rotFrac, 0) / n;
-    const tokens = t.split(/\s+/).filter(Boolean);
-    const numTok = tokens.filter(isNumericToken).length;
-    const wide = B.lines.reduce((s, L) => s + L.wideGaps, 0) / n;
+    const f = blockFeatures(B, body);
     const v = pages[B.page - 1].view; const pageH = v[3] - v[1];
     const nearBottom = B.lines[0].y < v[1] + 0.32 * pageH;
     let k = 'p';
-    if (rotFrac > 0.5) k = 'fig';
-    else if (/^(fig(ure)?\.?|table|tab\.)\s*[A-Z]?\d+[a-z]?\s*[.:—–-]/i.test(t)) k = 'cap';
-    else if (isHeadingText(t, n, ratio)) k = 'h';
-    else if (ratio <= 0.9 && nearBottom && (B.text.startsWith(SUP_O) || /^(\d{1,2}|[*†‡§])\s*\S/.test(t))) k = 'fn';
-    else if (wide >= 1.5 || (tokens.length >= 3 && numTok / tokens.length >= 0.45) || (n === 1 && t.length < 25 && tokens.length && numTok === tokens.length) || (ratio < 0.82 && t.length < 260) || (n >= 3 && tokens.length / n < 3.2 && !/[.!?]/.test(t))) k = 'fig';
-    B.k = k; B.ratio = ratio;
+    if (f.rotFrac > 0.5) k = 'fig';
+    else if (captionStart(f.t, f.ratio)) k = 'cap';
+    else if (isHeadingText(f.t, f.n, f.ratio)) k = 'h';
+    else if (f.ratio <= 0.9 && nearBottom && (B.text.startsWith(SUP_O) || /^(\d{1,2}(?![\d.,:])|[*†‡§])\s*\S/.test(f.t))) k = 'fn';
+    // Clear figure or table text: mostly numbers, or a grid with wide column gaps.
+    else if (!f.form && !f.prose && ((f.nt >= 3 && f.numTok >= 0.45 * f.nt) || (f.wide >= 1.5 && (f.n >= 2 || f.numTok >= 0.2 * f.nt)) || f.wide >= 3)) k = 'fig';
+    B.k = k; B.ratio = f.ratio; B.f = f;
   }
-  // Short label-like blocks sitting next to figure text are part of the figure (axis labels, legends).
-  for (let pass = 0, changed = true; changed && pass < 10; pass++) {
-    changed = false;
-    for (let i = 0; i < blocks.length; i++) {
-      const B = blocks[i];
-      if (B.k !== 'p' || B.lines.length > 2) continue;
-      const t = stripMarks(B.text).trim();
-      if (t.length > 60 || endsSentence(t) || BULLET_RE.test(t)) continue;
-      const nb = [blocks[i - 1], blocks[i + 1]].filter((x) => x && x.page === B.page);
-      if (nb.some((x) => x.k === 'fig')) { B.k = 'fig'; changed = true; }
+
+  // Tick labels: two or more lone numbers in a row on one page.
+  const lone = blocks.map((B) => B.k === 'p' && isSingleNumber(B.f) && !endsSentence(B.f.t));
+  const lonePair = (i, j) => j >= 0 && j < blocks.length && lone[j] && blocks[j].page === blocks[i].page;
+  for (let i = 0; i < blocks.length; i++) if (lone[i] && (lonePair(i, i - 1) || lonePair(i, i + 1))) blocks[i].k = 'fig';
+
+  // Headings. A form row set large ("Proposal Number: 24-XRP24-0042", "Answer: No") is not a section, unless a
+  // paragraph follows it ("Aim 1: Measure …"); a title with a colon and a long value stays a heading.
+  // Four or more heading-style lines in a row with almost nothing between them are the rows of a form or a list.
+  for (let i = 0; i < blocks.length; i++) {
+    const B = blocks[i], N = blocks[i + 1];
+    if (B.k !== 'h' || !FORM_LINE.test(B.f.t)) continue;
+    if (N && N.page === B.page && N.k === 'p' && N.f.prose) continue;
+    const valueWords = B.f.t.slice(B.f.t.indexOf(':') + 1).trim().split(/\s+/).filter(Boolean).length;
+    const formRows = B.lines.filter((L) => FORM_LINE.test(stripMarks(L.text).trim())).length;
+    if (formRows >= 2 || valueWords < 5) B.k = 'p';
+  }
+  const heads = [];
+  blocks.forEach((B, i) => { if (B.k === 'h') heads.push(i); });
+  const tokensBetween = (a, b) => { let w = 0; for (let j = a + 1; j < b; j++) w += blocks[j].f.nt; return w; };
+  for (let x = 0; x < heads.length;) {
+    let y = x;
+    while (y + 1 < heads.length && Math.abs(blocks[heads[y + 1]].ratio - blocks[heads[y]].ratio) <= 0.06 && tokensBetween(heads[y], heads[y + 1]) < 8) y++;
+    if (y - x + 1 >= 4) {
+      const last = heads[y], N = blocks[last + 1];
+      for (let z = x; z < y; z++) blocks[heads[z]].k = 'p';
+      // The last one stays a heading only when a paragraph follows it directly.
+      if (!(N && N.k === 'p' && N.f.prose) || BULLET_RE.test(blocks[last].f.t)) blocks[last].k = 'p';
     }
+    x = y + 1;
   }
+
+  // Caption text that goes on in the next block: a second paragraph, or a break caused by a taller line.
+  for (let i = 1; i < blocks.length; i++) {
+    const P = blocks[i - 1], C = blocks[i];
+    if (P.k !== 'cap' || C.k !== 'p' || C.page !== P.page || Math.abs(C.ratio - P.ratio) > 0.08) continue;
+    if (C.f.wide >= 1 || C.f.numTok >= 0.3 * C.f.nt || C.f.form) continue;          // a table header or form row
+    const bare = P.f.chars <= 14 && CAP_LABEL.test(P.f.t);                           // "Figure 1" on its own line
+    if (C.ratio > 0.95 && !bare) continue;                                          // body-size text after a caption is body text
+    const PL = P.lines[P.lines.length - 1], CL = C.lines[0];
+    const dy = PL.y - CL.y;
+    const open = !endsSentence(P.text) || /^\p{Ll}/u.test(C.f.t);
+    if (dy > 0 && dy <= (open ? 3 : 2.3) * Math.max(PL.h, CL.h)) C.k = 'cap';
+  }
+
+  // Short labels next to clear figure text belong to the figure (axis labels, legends, panel letters).
+  // Only label-like text can join, and only a few steps away, so it cannot spread over a cover page.
+  const weak = (C) => C.k === 'p' && !isProtected(C.f) &&
+    (isSingleNumber(C.f) || (C.f.n >= 3 && C.f.nt / C.f.n < 3.2 && !/[.!?]/.test(C.f.t)) ||
+     C.f.wide >= 2 || (C.f.wide >= 1 && C.f.n === 1 && C.f.nt <= 8) || (C.f.ratio < 0.9 && C.f.nt <= 6 && C.f.chars <= 60));
+  const tiny = (C) => C.k === 'p' && !isProtected(C.f) && C.f.nt <= 3 && C.f.chars <= 25;
+  // Only plot-like text pulls labels in (numbers, rotated text); a grid of words such as an address does not.
+  const seed = blocks.map((B) => B.k === 'fig' && (B.f.rotFrac > 0.5 || B.f.numTok >= 0.3 * B.f.nt));
+  let frontier = [];
+  seed.forEach((s, i) => { if (s) frontier.push(i); });
+  for (let step = 0; step < 3 && frontier.length; step++) {
+    const next = [];
+    for (const i of frontier) {
+      for (const j of [i - 1, i + 1]) {
+        const C = blocks[j];
+        if (!C || C.page !== blocks[i].page) continue;
+        if (weak(C) || (seed[i] && tiny(C))) { C.k = 'fig'; next.push(j); }
+      }
+    }
+    frontier = next;
+  }
+  for (let i = 1; i + 1 < blocks.length; i++) {
+    const A = blocks[i - 1], B = blocks[i], C = blocks[i + 1];
+    if (tiny(B) && A.k === 'fig' && C.k === 'fig' && A.page === B.page && C.page === B.page) B.k = 'fig';
+  }
+
   let inRefs = false, refRatio = 0;
   for (const B of blocks) {
     const t = stripMarks(B.text).trim();
@@ -1432,11 +1543,34 @@ function mergeAcrossPages(blocks) {
     if (iQ < 0) continue;
     const P = out[iP], Q = out[iQ];
     if (endsSentence(P.text)) continue;
+    // Form rows and labels ("Answer: No", "Jane Doe") do not run on into the next page.
+    const rowLike = (B) => B.f && B.lines.length <= 2 && (B.f.form || !B.f.prose);
+    if (rowLike(P) || (rowLike(Q) && /^\p{Lu}/u.test(Q.f.t))) continue;
     appendText(P, Q.text, Q.segs);
     P.lines = P.lines.concat(Q.lines);
     out.splice(iQ, 1);
   }
   return out;
+}
+
+// Leading pages that read as a form rather than as text (cover pages, title page): most of their characters
+// are labels, values, tables or headings. One text page between form pages (a summary) is included.
+function coverPageCount(blocks, nPages) {
+  const tot = new Array(nPages + 2).fill(0), prose = new Array(nPages + 2).fill(0);
+  for (const B of blocks) {
+    const c = B.f ? B.f.chars : stripMarks(B.text).length;
+    tot[B.page] += c;
+    if ((B.k === 'p' || B.k === 'cap' || B.k === 'fn') && !B.ref && B.f && B.f.prose && !B.f.form && (B.lines.length >= 2 || c >= 80)) prose[B.page] += c;
+  }
+  const formPage = (p) => tot[p] >= 30 && prose[p] < 0.5 * tot[p];
+  let k = 0, last = 0;
+  for (let p = 1; p <= nPages; p++) {
+    if (tot[p] < 30) { if (last === p - 1) last = p; continue; }        // blank or image-only page
+    if (formPage(p)) { k = p; last = p; continue; }
+    if (k && last === p - 1 && p < nPages && formPage(p + 1)) { last = p; continue; }
+    break;
+  }
+  return k >= nPages ? 0 : k;
 }
 
 // ── 7. Sentences ───────────────────────────────────────────────────────────
@@ -1560,13 +1694,14 @@ async function parseDocument(pdf, opts = {}) {
   let blocks = buildBlocks(pagesLines, metrics);
   classify(blocks, metrics, pages);
   blocks = mergeAcrossPages(blocks);
+  const cover = coverPageCount(blocks, pages.length);
   const { sents, blocks: outBlocks } = buildSentences(blocks);
   const chars = sents.reduce((s, x) => s + stripMarks(x.t).length, 0);
   return {
     v: PARSER_VERSION,
     nPages: pages.length,
     pages: pages.map((p) => ({ view: p.view.map((x) => +(+x).toFixed(2)), rot: p.rot })),
-    sents, blocks: outBlocks, chars,
+    sents, blocks: outBlocks, chars, cover,
     words: sents.reduce((s, x) => s + countWords(x.t), 0),
   };
 }
@@ -1776,7 +1911,7 @@ const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = se
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const reduceMotion = () => !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
 class UserError extends Error {}
-const BUILD = "2026-11-12 00:22 UTC, 9a5f83b";
+const BUILD = "2026-11-12 01:30 UTC, ac9d1ac";
 // Diagnostic log kept on this device (localStorage) so problems on a phone can be reported.
 // It holds events, counts, sizes, and timings only: never proposal text or file names.
 const Diag = {
@@ -3329,6 +3464,34 @@ function anchorItem(model, it, normCache) {
   }
   return false;
 }
+// When a newer text engine parses a stored PDF again, sentence numbers can shift. Match old sentences to new ones
+// by their text (in order) so the reading position and the heard marks stay on the same sentences.
+function alignSents(oldS, newS) {
+  const where = new Map();
+  newS.forEach((s, j) => { const t = normQ(s.t); if (!t) return; const l = where.get(t); if (l) l.push(j); else where.set(t, [j]); });
+  const map = new Int32Array(oldS.length).fill(-1);
+  let from = 0;
+  for (let i = 0; i < oldS.length; i++) {
+    const l = where.get(normQ(oldS[i].t));
+    if (!l) continue;
+    const j = l.find((c) => c >= from && c <= from + 200);
+    if (j === undefined) continue;
+    map[i] = j; from = j + 1;
+  }
+  return map;
+}
+function remapIndex(map, i) {
+  if (i >= 0 && i < map.length && map[i] >= 0) return { i: map[i], exact: true };
+  for (let k = Math.min(i, map.length - 1); k >= 0; k--) if (map[k] >= 0) return { i: map[k], exact: false };
+  for (let k = Math.max(i, 0); k < map.length; k++) if (map[k] >= 0) return { i: map[k], exact: false };
+  return { i: 0, exact: false };
+}
+function remapHeard(bits, map, n) {
+  const out = new Uint8Array((n + 7) >> 3);
+  const lim = Math.min(map.length, bits.length * 8);
+  for (let i = 0; i < lim; i++) if (((bits[i >> 3] >> (i & 7)) & 1) && map[i] >= 0) { const j = map[i]; out[j >> 3] |= 1 << (j & 7); }
+  return out;
+}
 function mergeNotes(target, incoming, model) {
   const norm = model.sents.map((s) => normQ(s.t));
   const byId = new Map(target.items.map((x) => [x.id, x]));
@@ -3450,7 +3613,9 @@ async function openDoc(id, opt = {}) {
   const doc = await Store.get('docs', id);
   if (!doc) { toast('That proposal is no longer on this device.'); renderLibrary(); return; }
   let raw = await Store.get('parsed', id);
+  let remap = null;
   if (!raw || raw.v !== PARSER_VERSION) {
+    const old = raw;
     const buf = await Store.get('files', id);
     if (!buf) { toast('The PDF is no longer stored here. Add it again.'); return; }
     busy('Updating text…');
@@ -3458,6 +3623,7 @@ async function openDoc(id, opt = {}) {
       raw = await withPdf(new Uint8Array(buf), (pdf) => parseGuarded(pdf, { maxPages: doc.totalPages > doc.nPages ? doc.nPages : 0 }));
       const store = { ...raw }; await Store.put('parsed', id, store);
     } finally { busy(false); }
+    if (old && Array.isArray(old.sents) && old.sents.length) remap = alignSents(old.sents, raw.sents);
   }
   const model = prepModel(raw);
   const notes = (await Store.get('notes', id)) || emptyNotes();
@@ -3465,11 +3631,25 @@ async function openDoc(id, opt = {}) {
   const norm = model.sents.map((s) => normQ(s.t));
   notes.items = notes.items.filter((it) => anchorItem(model, it, norm));
   if (notes.heard && !(notes.heard instanceof Uint8Array)) notes.heard = null;
+  if (remap) {
+    const r = remapIndex(remap, doc.cur | 0);
+    doc.cur = r.i; if (!r.exact) doc.ch = 0;
+    if (notes.heard) notes.heard = remapHeard(notes.heard, remap, model.sents.length);
+    doc.nSents = model.sents.length; doc.words = model.words;
+    await Store.put('docs', id, doc);
+    await Store.put('notes', id, notes);
+    let matched = 0; for (const x of remap) if (x >= 0) matched++;
+    Diag.log(`text updated by a newer engine: ${matched} of ${remap.length} sentences matched`);
+  }
   if (App.handle) { const hh = App.handle; App.handle = null; hh.close(); }
   Player.stop();
   App.doc = doc; App.model = model; App.notes = notes;
   App.cache.clear(); App.rules = null; App.suffix = null; App.follow = true;
   App.cur = clamp(doc.cur || 0, 0, model.sents.length - 1);
+  if (doc.curQ && !remap) {          // e.g. a saved state from an older version: find the sentence by its text
+    const it = { a: App.cur, b: App.cur, quote: doc.curQ };
+    if (anchorItem(model, it, norm) && it.a !== App.cur) { Diag.log('reading place found by its text'); App.cur = it.a; doc.ch = 0; }
+  }
   PageView.reset();
   showScreen('read');
   els.docTitle.textContent = doc.title || doc.name;
@@ -3648,6 +3828,7 @@ const savePosSoon = debounce(() => savePos(), 1500);
 async function savePos() {
   if (!App.doc || !App.model) return;
   App.doc.cur = App.cur; App.doc.heardPct = heardPct(); App.doc.playWords = playWords(App.model, App.S);
+  App.doc.curQ = normQ(App.model.sents[App.cur] && App.model.sents[App.cur].t).slice(0, 48);   // finds the place again if numbering shifts
   App.doc.ch = Player.state === 'paused' ? (Player.resumeChar || 0) : Player.state === 'playing' ? (Player.lastChar || 0) : 0;
   await Store.put('docs', App.doc.id, App.doc);
 }
@@ -4160,14 +4341,36 @@ function sectionCoverage(i) {
   for (let j = i + 1; j < M.sents.length; j++) if (M.sents[j].k === 'h') { end = j; break; }
   return heardPctOf(M, App.notes, App.S, i, end);
 }
+// Headings on the leading cover pages (pages that read as a form) fold into one "Cover pages" entry.
+function coverGroup(M, heads) {
+  const pages = M.cover | 0;
+  if (!pages) return null;
+  const items = heads.filter((B) => B.p <= pages);
+  if (items.length < 2) return null;
+  const j = M.sents.findIndex((s) => s.p > pages);
+  return { pages, items, end: j < 0 ? M.sents.length : j };
+}
 function openTocSheet(focusSearch) {
   const M = App.model;
   const heads = M.blocks.filter((B) => B.k === 'h' && !B.ref);
+  const cg = coverGroup(M, heads);
+  const row = (B, sub) => {
+    const i = B.s0; const cov = sectionCoverage(i);
+    return `<li class="vrow toc lvl${sub ? 2 : B.lvl}${sub ? ' toc-sub' : ''}${i <= App.cur && (M.secOf[App.cur] === i) ? ' here' : ''}" tabindex="0" data-i="${i}"${sub ? ' hidden' : ''}><span class="vname">${esc(stripMarks(M.sents[i].t))}</span><span class="vmeta">p. ${M.sents[i].p}${cov === null ? '' : ` · ${cov}% heard`}</span></li>`;
+  };
+  let rows = '';
+  if (cg) {
+    const h = heardPctOf(M, App.notes, App.S, 0, cg.end);
+    rows += `<li class="vrow toc lvl1 toc-group${App.cur < cg.end ? ' here' : ''}" tabindex="0" data-i="0"><span class="vname">Cover pages</span><span class="vmeta">${cg.pages > 1 ? `pp. 1–${cg.pages}` : 'p. 1'}${h === null ? '' : ` · ${h}% heard`}</span></li>`;
+    rows += `<li class="toc-more"><button type="button" class="mini" data-exp="cover" aria-expanded="false">Show the ${cg.items.length} headings</button></li>`;
+    rows += cg.items.map((B) => row(B, true)).join('');
+  }
+  rows += heads.filter((B) => !cg || B.p > cg.pages).map((B) => row(B, false)).join('');
   const b = openSheet('Sections and search', `<div class="stack">
     <input type="search" id="findQ" placeholder="Search this proposal" autocomplete="off" aria-label="Search this proposal">
     <ul class="list" id="findRes" hidden></ul>
     <div id="tocWrap">
-      ${heads.length ? `<ul class="list">${heads.map((B) => { const i = B.s0; const cov = sectionCoverage(i); return `<li class="vrow toc lvl${B.lvl}${i <= App.cur && (App.model.secOf[App.cur] === i) ? ' here' : ''}" tabindex="0" data-i="${i}"><span class="vname">${esc(stripMarks(M.sents[i].t))}</span><span class="vmeta">p. ${M.sents[i].p}${cov === null ? '' : ` · ${cov}% heard`}</span></li>`; }).join('')}</ul>` : '<p class="hint">No section headings were found in this PDF.</p>'}
+      ${heads.length ? `<ul class="list">${rows}</ul>` : '<p class="hint">No section headings were found in this PDF.</p>'}
       <div class="sec-h">Pages</div>
       <div class="seg pages">${Array.from({ length: M.nPages }, (_, k) => `<button type="button" data-page="${k + 1}">${k + 1}</button>`).join('')}</div>
     </div></div>`, { tall: true });
@@ -4191,6 +4394,14 @@ function openTocSheet(focusSearch) {
   }, 180);
   b.oninput = (e) => { if (e.target.id === 'findQ') run(); };
   b.onclick = (e) => {
+    const ex = e.target.closest('[data-exp]');
+    if (ex) {
+      const open = ex.getAttribute('aria-expanded') !== 'true';
+      ex.setAttribute('aria-expanded', String(open));
+      b.querySelectorAll('.toc-sub').forEach((el) => { el.hidden = !open; });
+      ex.textContent = open ? 'Hide the headings' : `Show the ${b.querySelectorAll('.toc-sub').length} headings`;
+      return;
+    }
     const r = e.target.closest('[data-i]'); const pg = e.target.closest('[data-page]');
     if (r) { const i = +r.dataset.i; closeSheet(); jumpTo(i, false); flash(i); }
     else if (pg) { const p = +pg.dataset.page; const i = (App.model.byPage[p] && App.model.byPage[p][0]) ?? App.model.sents.findIndex((s) => s.p >= p); closeSheet(); if (i >= 0) { jumpTo(i, false); flash(i); } }
