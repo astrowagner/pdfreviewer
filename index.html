@@ -1941,7 +1941,7 @@ const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = se
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const reduceMotion = () => !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
 class UserError extends Error {}
-const BUILD = "2026-11-12 02:20 UTC, 4ea7562";
+const BUILD = "2026-11-12 03:05 UTC, 9aa3f09";
 // Diagnostic log kept on this device (localStorage) so problems on a phone can be reported.
 // It holds events, counts, sizes, and timings only: never proposal text or file names.
 const Diag = {
@@ -2643,6 +2643,7 @@ const NV = {
     if (!this.url) this.url = URL.createObjectURL(new Blob([$id('src-ttsworker').textContent], { type: 'text/javascript' }));
     const slot = { w: new Worker(this.url), job: null, ok: false };
     slot.ready = new Promise((res, rej) => { slot.res = res; slot.rej = rej; });
+    slot.ready.catch(() => {});                 // failures are handled in onMsg/onCrash (a helper's is not awaited)
     slot.w.onmessage = (e) => this.onMsg(slot, e.data || {});
     slot.w.onerror = (e) => { if (e && e.preventDefault) e.preventDefault(); this.onCrash(slot, new Error((e && e.message) || 'The voice engine stopped.')); };
     slot.w.postMessage({ type: 'init', base: document.baseURI, files: this.manifest().files });
@@ -2701,8 +2702,18 @@ const NV = {
   },
   onCrash(slot, err) {
     if (this.slots[0] === slot && (!slot.ok || this.slots.length === 1)) { slot.rej(err); if (this.state !== 'loading') this.fail(err); return; }
-    this.single = true;                         // a helper worker failed: continue with one
+    this.helperFailed(err);                     // a helper worker failed: continue with one
     slot.rej(err); this.drop(slot); this.pump();
+  },
+  // A second worker failed. If it did not fit in memory, this device keeps to one from now on (each try at a second
+  // one ran out of memory on an iPhone, and Safari closed the page soon after).
+  helperFailed(err) {
+    this.single = true;
+    const msg = (err && err.message) || String(err);
+    if (/out of memory|no available backend/i.test(msg) && App.S.nvWorkers !== 1) {
+      App.S.nvWorkers = 1; saveSettings();
+      Diag.log('voice: a second worker does not fit in memory on this device; using one from now on');
+    } else Diag.log('voice: the second worker stopped (' + msg.slice(0, 80) + '); using one');
   },
   onMsg(slot, m) {
     if (m.type === 'progress') {
@@ -2712,7 +2723,7 @@ const NV = {
     } else if (m.type === 'error') {
       const e = new Error(m.message);
       if (slot === this.slots[0] && this.state === 'loading') slot.rej(e);
-      else { this.single = true; slot.rej(e); this.drop(slot); this.pump(); }
+      else { this.helperFailed(e); slot.rej(e); this.drop(slot); this.pump(); }
     } else if (m.type === 'log') {
       Diag.log('voice worker: ' + m.msg);
     } else if (m.type === 'audio' || m.type === 'synth-error') {
@@ -4726,14 +4737,27 @@ function setView(v, initial) {
 const PageView = {
   built: false, els: [], rendered: new Map(), busy: new Set(), io: null,
   reset() { this.built = false; this.els = []; this.rendered.clear(); this.busy.clear(); if (this.io) this.io.disconnect(); this.io = null; if (els.pageView) els.pageView.innerHTML = ''; },
-  async pdf() {
-    if (App.handle) return App.handle.pdf;
-    const buf = await Store.get('files', App.doc.id);
-    if (!buf) throw new UserError('The PDF is no longer stored on this device. Add it again to see its pages.');
-    const h = await PDF.open(new Uint8Array(buf));
-    if (App.handle) { h.close(); return App.handle.pdf; }
-    App.handle = h;
-    return h.pdf;
+  // One open PDF for all page renders: renders that start together wait for the same open (they used to open the
+  // file once each, six copies at once, while the voice model was loading).
+  opening: null,
+  pdf() {
+    if (App.handle) return Promise.resolve(App.handle.pdf);
+    if (this.opening && this.opening.id === App.doc.id) return this.opening.p;
+    const id = App.doc.id;
+    let p = null;
+    p = (async () => {
+      try {
+        const buf = await Store.get('files', id);
+        if (!buf) throw new UserError('The PDF is no longer stored on this device. Add it again to see its pages.');
+        const h = await PDF.open(new Uint8Array(buf));
+        if (!App.doc || App.doc.id !== id) { h.close(); throw Object.assign(new Error('closed'), { name: 'RenderingCancelledException' }); }
+        if (App.handle) { h.close(); return App.handle.pdf; }
+        App.handle = h;
+        return h.pdf;
+      } finally { if (this.opening && this.opening.p === p) this.opening = null; }
+    })();
+    this.opening = { id, p };
+    return p;
   },
   build() {
     if (this.built || !App.model) return;
