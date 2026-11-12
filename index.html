@@ -1968,7 +1968,7 @@ const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = se
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const reduceMotion = () => !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
 class UserError extends Error {}
-const BUILD = "2026-11-12 05:15 UTC, ad3a341";
+const BUILD = "2026-11-12 15:14 UTC, f69ee30";
 // Diagnostic log kept on this device (localStorage) so problems on a phone can be reported.
 // It holds events, counts, sizes, and timings only: never proposal text or file names.
 const Diag = {
@@ -2510,6 +2510,10 @@ const NV_AHEAD_SECS = 600, NV_AHEAD_SENTS = 120;        // how far ahead to make
 const NV_REBUFFER_SECS = 20;                            // when the voice falls behind, collect at least this much before resuming
 const NV_SPAN_SECS = 600;                               // ... and enough to then play about this long without stopping
 const NV_IDLE_MS = 5 * 60000;                          // free the model's memory after this long without playing
+// Safari on iPhone: the voice worker's memory grows while it works until Safari closes the page (2 min 52 s to
+// 3 min 32 s into each run in the diagnostic logs, and a restart of the worker reset that clock; Chrome stays flat).
+// So on iPhone it restarts between sentences after this much work; it loads again from this device in about a second.
+const NV_RECYCLE = IS_IOS ? { ms: 90000, n: 8 } : null;
 const NV_STORE_BUDGET = 1024 * 1048576;                 // rendered speech kept on this device (oldest removed first)
 
 // Rendered speech kept on this device (IndexedDB), so speech made once plays again without waiting, also after
@@ -2585,6 +2589,7 @@ const NV = {
   man: undefined, state: 'off', error: '', prog: null, cached: null,
   slots: [], queue: [], jobs: new Map(), seq: 0, clips: new Map(), bytes: 0, loads: new Map(), prepKeys: null,
   stats: { gen: 0, audio: 0 }, url: null, readyP: null, single: false, wasReady: false,
+  recycleAt: NV_RECYCLE, recycling: false, recycles: 0,   // recycleAt: test hook ({ ms, n } or null)
   sessionOptions: undefined,                    // ONNX Runtime session options for the workers (undefined: its defaults;
                                                 // code/measure_voice_memory.mjs compares settings)
   // WebAssembly memory of the largest worker, in MB, as the workers report it (0 until known).
@@ -2663,7 +2668,7 @@ const NV = {
     Diag.log(`voice: loading (${this.cached ? 'from this device' : 'download'})`);
     const slot = this.spawn();
     this.readyP = slot.ready.then(() => {
-      this.state = 'ready'; this.cached = true; this.prog = null; this.wasReady = true; this.changed(); this.pump();
+      this.state = 'ready'; this.cached = true; this.prog = null; this.wasReady = true; this.recycling = false; this.changed(); this.pump();
       if (typeof NPlay !== 'undefined') NPlay.retriedStart = false;
       Diag.log(`voice: ready in ${Math.round(performance.now() - t0)} ms; memory ${this.memMB()} MB`);
       NPlay.warm();
@@ -2690,7 +2695,7 @@ const NV = {
     Diag.log('voice: unloaded (' + why + ')');
     if (NPlay.prep) { Diag.log(`voice: stopped preparing ahead (${why}; ${NPlay.prep.done} of ${NPlay.prep.total} done)`); NPlay.prep = null; this.prepKeys = null; PrepMark.clear(); }
     for (const s of this.slots) { clearTimeout(s.timer); try { s.w.terminate(); } catch (e) { /* ignore */ } }
-    this.slots = []; this.readyP = null; this.prog = null; this.growing = false;
+    this.slots = []; this.readyP = null; this.prog = null; this.growing = false; this.recycling = false;
     const all = [...this.queue, ...this.jobs.values()];
     this.queue = []; this.jobs.clear();
     for (const j of all) j.reject(Object.assign(new Error('unloaded'), { dropped: true }));
@@ -2701,6 +2706,20 @@ const NV = {
   idleSoon() {
     clearTimeout(this.idleT);
     this.idleT = setTimeout(() => { if (Player.state !== 'playing' && this.state === 'ready' && !NPlay.prep) this.unload('idle'); else this.idleSoon(); }, NV_IDLE_MS);
+  },
+  // One worker that has done its share of work (see NV_RECYCLE), with nothing running and more to do.
+  tired() {
+    const R = this.recycleAt, s = this.slots[0];
+    if (!R || this.slots.length !== 1 || this.jobs.size || !s.ok || s.born == null) return false;
+    return s.made >= R.n || performance.now() - s.born >= R.ms;
+  },
+  // Restart the worker to free its memory, between sentences; the queue is kept and continues once it has loaded.
+  recycle() {
+    const s = this.slots[0];
+    Diag.log(`voice: restarting to free memory (${s.made} sentences in ${Math.round((performance.now() - s.born) / 1000)} s; memory ${s.mem || '?'} MB)`);
+    clearTimeout(s.timer); try { s.w.terminate(); } catch (e) { /* ignore */ }
+    this.slots = []; this.readyP = null; this.state = 'off'; this.growing = false; this.recycling = true; this.recycles++;
+    this.ensure().catch(() => {});
   },
   // A sentence took far too long (a stuck worker): restart the workers and keep the queue; give up on a
   // sentence that gets stuck twice.
@@ -2722,7 +2741,7 @@ const NV = {
     if (slot.job) { const j = slot.job; slot.job = null; this.jobs.delete(j.id); this.queue.unshift(j); }
   },
   fail(e) {
-    this.state = 'error'; this.error = (e && e.message) || String(e); this.readyP = null; this.prog = null;
+    this.state = 'error'; this.error = (e && e.message) || String(e); this.readyP = null; this.prog = null; this.recycling = false;
     Diag.log('voice: failed: ' + this.error);
     for (const s of this.slots) { clearTimeout(s.timer); try { s.w.terminate(); } catch (x) { /* ignore */ } }
     this.slots = [];
@@ -2751,7 +2770,7 @@ const NV = {
     if (m.type === 'progress') {
       if (this.state === 'loading' && slot === this.slots[0] && m.phase !== 'voice') { this.prog = { phase: m.phase, done: m.done, total: m.total }; this.changed(); }
     } else if (m.type === 'ready') {
-      slot.ok = true; slot.mem = m.mem || 0; slot.res(); this.pump();
+      slot.ok = true; slot.mem = m.mem || 0; slot.born = performance.now(); slot.made = 0; slot.res(); this.pump();
     } else if (m.type === 'error') {
       const e = new Error(m.message);
       if (slot === this.slots[0] && this.state === 'loading') slot.rej(e);
@@ -2760,7 +2779,7 @@ const NV = {
       Diag.log('voice worker: ' + m.msg);
     } else if (m.type === 'audio' || m.type === 'synth-error') {
       const j = this.jobs.get(m.job);
-      this.jobs.delete(m.job); slot.job = null; clearTimeout(slot.timer);
+      this.jobs.delete(m.job); slot.job = null; clearTimeout(slot.timer); slot.made = (slot.made || 0) + 1;
       if (m.mem) {
         if (slot.mem && m.mem >= slot.mem + 16) Diag.log(`voice: memory ${slot.mem} → ${m.mem} MB (a sentence of ${j ? j.text.length : '?'} characters)`);
         slot.mem = m.mem;
@@ -2821,6 +2840,7 @@ const NV = {
   },
   pump() {
     if (this.state !== 'ready') return;
+    if (this.queue.length && this.tired()) { this.recycle(); return; }
     for (const s of this.slots) {
       if (!s.ok || s.job || !this.queue.length) continue;
       const j = this.queue.shift();
@@ -4264,7 +4284,7 @@ function onNaturalChanged() {
     if (pi && ptx) { ptx.textContent = prepText(pi); if (pbar) pbar.value = pi.pct; }
   }
   if (App.model && (NPlay.prep || NPlay.prepShown)) { NPlay.prepShown = !!NPlay.prep; updateProgress(); }
-  if (NPlay.waiting && NV.state === 'loading' && NV.prog && Player.playing) {
+  if (NPlay.waiting && NV.state === 'loading' && NV.prog && Player.playing && !NV.recycling) {   // not for a restart to free memory (about a second)
     // From this device's copy after a reload (not a new download), or downloading for the first time.
     toast(NV.prog.phase === 'download' && NV.prog.total ? `${NV.cached ? 'Loading the natural voice from this device' : 'Downloading the natural voice'}: ${mbOf(NV.prog.done)} of ${mbOf(NV.prog.total)} MB` : 'Getting the natural voice ready…');
   }
