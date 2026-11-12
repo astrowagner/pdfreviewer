@@ -101,6 +101,7 @@ button { -webkit-tap-highlight-color: transparent; }
 .icon-btn.lg .ic { width: 30px; height: 30px; }
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 46px; padding: 0 16px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); font-weight: 650; cursor: pointer; text-align: center; }
 .btn:hover { border-color: var(--muted); }
+a.btn { text-decoration: none; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .btn.danger { color: var(--c-weakness); }
 .btn.big { min-height: 54px; font-size: 16px; }
@@ -231,7 +232,7 @@ sup, sub { font-size: .68em; line-height: 0; }
 .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex: none; }
 .dot.strength { background: var(--c-strength); } .dot.weakness { background: var(--c-weakness); } .dot.question { background: var(--c-question); } .dot.note { background: var(--c-note); }
 .field label { display: block; font-size: 13px; font-weight: 650; color: var(--muted); margin-bottom: 5px; }
-textarea, input[type=text], input[type=search] { width: 100%; border: 1px solid var(--line); background: var(--paper); border-radius: 12px; padding: 11px 12px; font-size: 16px; }
+textarea, input[type=text], input[type=search], input[type=number] { width: 100%; border: 1px solid var(--line); background: var(--paper); border-radius: 12px; padding: 11px 12px; font-size: 16px; }
 textarea { min-height: 104px; resize: vertical; line-height: 1.45; }
 textarea.copybox { min-height: 55vh; font-size: 14px; }
 input[type=range] { width: 100%; accent-color: var(--accent); }
@@ -239,6 +240,11 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .seg button { min-height: 38px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--paper); font-weight: 650; font-size: 14px; font-variant-numeric: tabular-nums; cursor: pointer; }
 .seg button[aria-pressed=true] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .seg.pages button { min-width: 44px; }
+.seg.rating { margin-bottom: 8px; }
+.seg.rating button { min-width: 44px; }
+.grades { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.grades .grade { display: flex; flex-direction: column; justify-content: space-between; gap: 5px; margin: 0; font-size: 12.5px; font-weight: 650; color: var(--muted); }
+.grades .grade input { width: 100%; text-align: center; font-size: 18px; font-variant-numeric: tabular-nums; }
 .toggle { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
 .toggle input { width: 22px; height: 22px; accent-color: var(--accent); flex: none; margin: 0; }
 .toggle small { display: block; color: var(--muted); font-size: 12.5px; margin-top: 1px; }
@@ -1731,6 +1737,20 @@ function buildSentences(blocks) {
   return { sents, blocks: outBlocks };
 }
 
+// ── Review type hint ───────────────────────────────────────────────────────
+// Which program's review a proposal is probably for, from the text of its first pages (running headers included):
+// NASA (NSPIRES or ROSES identifiers), NSF (Intellectual Merit and Broader Impacts, which every NSF project summary
+// has), JWST (a JWST cycle, or JWST throughout), or an observing proposal. '' when nothing points one way; the
+// reviewer can always choose another type.
+function reviewKindHint(text) {
+  const t = String(text || '');
+  if (/\bNSPIRES\b|\bROSES[- ]?\d{2,4}\b|\bNNH\d{2}Z[A-Z]{2}\d{3}[A-Z]?\b|Research Opportunities in Space and Earth Sciences/i.test(t)) return 'nasa';
+  if (/\bintellectual merit\b/i.test(t) && /\bbroader impacts?\b/i.test(t)) return 'nsf';
+  if (/\bJWST\b[^.\n]{0,40}\bcycle\s*\d+\b/i.test(t) || (t.match(/\bJWST\b/g) || []).length >= 6) return 'jwst';
+  if (/\b(observing|telescope) time\b|\b(nights|hours|orbits) requested\b|\btime requested\b|\btime allocation committee\b|\b(HST|Hubble|ALMA|Chandra|ESO|NOIRLab|Gemini|Keck|LBT)\b[^.\n]{0,40}\b(cycle|period|semester)\s*\d/i.test(t)) return 'observing';
+  return '';
+}
+
 async function parseDocument(pdf, opts = {}) {
   const pages = await extractPages(pdf, opts.maxPages, opts.onProgress);
   const pagesLines = pages.map(buildLines);
@@ -1760,6 +1780,7 @@ async function parseDocument(pdf, opts = {}) {
     pages: pages.map((p) => ({ view: p.view.map((x) => +(+x).toFixed(2)), rot: p.rot })),
     sents, blocks: outBlocks, chars, cover, forms,
     words: sents.reduce((s, x) => s + countWords(x.t), 0),
+    reviewHint: reviewKindHint(pagesLines.slice(0, 3).flat().map((L) => stripMarks(L.text)).join('\n')),
   };
 }
 
@@ -1968,7 +1989,7 @@ const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = se
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const reduceMotion = () => !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
 class UserError extends Error {}
-const BUILD = "2026-11-12 15:14 UTC, f69ee30";
+const BUILD = "2026-11-12 17:53 UTC, 33e0e55";
 // Diagnostic log kept on this device (localStorage) so problems on a phone can be reported.
 // It holds events, counts, sizes, and timings only: never proposal text or file names.
 const Diag = {
@@ -2021,8 +2042,48 @@ const TAGS = {
 };
 const TAG_ORDER = ['strength', 'weakness', 'question', 'note'];
 
+// Review types: each program's criteria (strengths and weaknesses are filed under one), rating, and form sections.
+// Sources: NSF Proposal Evaluation System quick-start guide for ad hoc reviews (Intellectual Merit, Broader Impacts,
+// solicitation-specific criteria, summary statement; one or two ratings, Excellent to Poor); NASA's example ROSES
+// panel evaluation (2025: Intrinsic Merit with major and minor strengths and weaknesses; Relevance, Cost
+// Reasonableness and Data Management Plan; note to the PI; comments to NASA, not shared; E to P with split ratings);
+// STScI's JWST selection criteria and proposal feedback comments (In-field Impact, Out-of-field Impact, Suitability &
+// Feasibility, each graded 1 = best to 5 with one decimal, averaged; strengths, weaknesses, resources, comments).
+// `sec`: section headings that file a highlight under that criterion; the first criterion is the default.
+const REVIEW_TYPES = {
+  nsf: { label: 'NSF', name: 'NSF merit review', rating: 'adj', ratingLabel: 'Rating',
+    crits: [{ key: 'im', label: 'Intellectual Merit' }, { key: 'bi', label: 'Broader Impacts', sec: /\bbroader\s+impacts?\b/i },
+      { key: 'sol', label: 'Solicitation-specific criteria', sec: /solicitation[- ]specific|additional (review )?criteria/i }],
+    fields: [['summary', 'Summary of the proposal (for you)', 'What they propose to do, in a few sentences.'], ['general', 'Summary statement', 'Your overall assessment of both criteria, consistent with your rating.']],
+    tip: 'NSF asks for comments on Intellectual Merit and Broader Impacts, a summary statement, and one or two ratings (for example E/VG).' },
+  nasa: { label: 'NASA', name: 'NASA (ROSES) panel evaluation', rating: 'adj', ratingLabel: 'Overall rating', majorMinor: true,
+    crits: [{ key: 'merit', label: 'Intrinsic Merit' }, { key: 'rel', label: 'Relevance', sec: /\brelevance\b/i },
+      { key: 'cost', label: 'Cost Reasonableness', sec: /\bbudget\b|\bcosts?\b/i, budget: true }, { key: 'dmp', label: 'Data Management Plan', sec: /data management|open science/i }],
+    fields: [['summary', 'Brief summary of research objectives', 'What they propose to do, in a few sentences.'], ['general', 'Brief summary of overall evaluation', 'About one sentence per major finding.'],
+      ['notePI', 'Note to the PI (optional)', 'Not a finding: typos, unclear figures.'], ['toNASA', 'Comments to NASA (not shared with the PI)', 'For the program officer only.']],
+    tip: 'A major strength or weakness significantly changes the likelihood of success; a minor one less so, or only for a small part. Turn on Major in a highlight to make it major.' },
+  jwst: { label: 'JWST', name: 'JWST (STScI) review', rating: 'grades', crits: [],
+    grades: [['a', 'In-field Impact'], ['b', 'Out-of-field Impact'], ['c', 'Suitability & Feasibility']],
+    fields: [['summary', 'Summary of the proposal (for you)', 'What they propose to do, in a few sentences.'], ['resources', 'Resources (optional)', 'Time request, targets, or instruments, only if something is out of the ordinary.'], ['general', 'Comments (optional)', 'Anything that does not fit under strengths, weaknesses, or resources.']],
+    tip: 'Grade each criterion from 1 (best) to 5, with at most one decimal; the overall grade is their average. Feedback refers to what the proposal says, not to the team, and avoids questions.' },
+  observing: { label: 'General observing', name: 'Observing proposal review', rating: 'text', ratingLabel: 'Grade', ratingHint: 'For example: 1.5, or Excellent',
+    crits: [{ key: 'sci', label: 'Scientific merit' }, { key: 'tech', label: 'Technical feasibility', sec: /technical|feasibilit|observing (strategy|plan)|observations?\b|exposure|instrument/i },
+      { key: 'res', label: 'Time and resources requested', sec: /time (request|justification)|requested (time|resources)|justification of (the )?(requested )?time|resources requested/i }],
+    fields: [['summary', 'Summary of the proposal', 'What they propose to do, in a few sentences.'], ['general', 'Overall assessment', 'Your overall view for the committee.']],
+    tip: '' },
+  funding: { label: 'General funding', name: 'Funding proposal review', rating: 'text', ratingLabel: 'Rating', ratingHint: 'For example: Very Good, or 2.1',
+    crits: [{ key: 'sig', label: 'Significance and impact' }, { key: 'app', label: 'Approach and methods', sec: /method|approach|work ?plan|research plan|technical|timeline|schedule/i },
+      { key: 'team', label: 'Team and resources', sec: /personnel|\bteam\b|qualification|facilit|project management|biographical|current and pending/i }, { key: 'budget', label: 'Budget', sec: /\bbudget\b|\bcosts?\b/i, budget: true }],
+    fields: [['summary', 'Summary of the proposal', 'What they propose to do, in a few sentences.'], ['general', 'Overall assessment', 'Your overall view for the panel.']],
+    tip: '' },
+};
+const REVIEW_ORDER = ['nsf', 'nasa', 'jwst', 'observing', 'funding'];
+const ADJ_RATINGS = [['E', 'Excellent'], ['E/VG', 'Excellent/Very Good'], ['VG', 'Very Good'], ['VG/G', 'Very Good/Good'], ['G', 'Good'], ['G/F', 'Good/Fair'], ['F', 'Fair'], ['F/P', 'Fair/Poor'], ['P', 'Poor']];
+// Text fields of a review that are kept and merged (besides the type and the JWST grades).
+const REVIEW_TEXT_KEYS = ['rating', 'summary', 'general', 'notePI', 'toNASA', 'resources'];
+
 const DEFAULTS = {
-  rate: 1.0, pitch: 1.0, voice: '', localOnly: true, allVoices: false, engine: 'device', nvoice: 'af_heart', nvWorkers: 0,
+  rate: 1.0, pitch: 1.0, voice: '', localOnly: true, allVoices: false, engine: 'device', nvoice: 'af_heart', nvWorkers: 0, reviewType: '',
   // The state file is offered automatically only where this browser erases the app's data when it quits.
   autoReopen: true, lastDoc: '', autoFile: false, autoState: ERASES_ON_QUIT,
   skipCitations: true, skipRefs: true, skipFigs: true, readCaptions: true, skipFootnotes: false, skipUrls: true, expand: true,
@@ -2307,21 +2368,47 @@ const Wake = {
   },
   async off() { const l = this.lock; this.lock = null; try { if (l) await l.release(); } catch (e) { /* ignore */ } },
 };
+// The lock screen, Control Center and headphone buttons (AirPods: press to play or pause, press twice for the next
+// sentence, three times for the previous one). They reach the page while it plays audio: the natural voice's clips,
+// or, under a device voice, a silent track (NPlay.speechKeep).
 const Media = {
+  key: '', art: null,
   init() {
     if (!('mediaSession' in navigator)) return;
     const set = (a, f) => { try { navigator.mediaSession.setActionHandler(a, f); } catch (e) { /* unsupported */ } };
-    set('play', () => Player.toggle());
+    set('play', () => { if (Player.state !== 'playing') Player.toggle(); });
     set('pause', () => Player.pause());
+    set('stop', () => Player.pause());
     set('previoustrack', () => Player.skip(-1));
     set('nexttrack', () => Player.skip(1));
+    set('seekto', (d) => { if (d && Number.isFinite(d.seekTime)) Player.seekTo(d.seekTime); });
+  },
+  artwork() {
+    if (this.art) return this.art;
+    const l = document.querySelector('link[rel="apple-touch-icon"]'), src = l && l.getAttribute('href');
+    this.art = !src ? [] : /^data:image\/png/.test(src) ? [{ src, sizes: '180x180', type: 'image/png' }] : [{ src, sizes: 'any', type: 'image/svg+xml' }];
+    return this.art;
   },
   update() {
     try {
-      if (!('mediaSession' in navigator) || !App.doc) return;
-      const s = App.model.sents[App.cur];
-      navigator.mediaSession.metadata = new MediaMetadata({ title: App.doc.title, artist: 'Proposal Listener', album: s ? 'Page ' + s.p : '' });
-      navigator.mediaSession.playbackState = Player.state === 'playing' ? 'playing' : 'paused';
+      if (!('mediaSession' in navigator) || !App.doc || !App.model) return;
+      const ms = navigator.mediaSession, s = App.model.sents[App.cur];
+      const title = App.doc.title || App.doc.name || 'Proposal', album = s ? 'Page ' + s.p : '';
+      if (this.key !== title + '\n' + album) {       // only when it changes, so the lock screen does not redraw each sentence
+        this.key = title + '\n' + album;
+        ms.metadata = new MediaMetadata({ title, artist: 'Proposal Listener', album, artwork: this.artwork() });
+      }
+      ms.playbackState = Player.state === 'playing' ? 'playing' : Player.state === 'paused' ? 'paused' : 'none';
+      const w = Player.where();
+      if (w && typeof ms.setPositionState === 'function') ms.setPositionState(w);
+    } catch (e) { /* ignore */ }
+  },
+  clear() {
+    try {
+      if (!('mediaSession' in navigator)) return;
+      this.key = '';
+      navigator.mediaSession.metadata = null;
+      navigator.mediaSession.playbackState = 'none';
     } catch (e) { /* ignore */ }
   },
 };
@@ -2364,11 +2451,14 @@ const Player = {
     try { wasActive = speechSynthesis.speaking || speechSynthesis.pending; } catch (e) { /* ignore */ }
     const gen = ++this.gen;
     this.q = []; this.queuedTo = i - 1; this.state = 'playing'; this.lastChar = fromChar; this.resumeChar = 0;
+    this.runAt = performance.now(); this.firstAt = 0; this.nStarted = 0;
+    NPlay.speechKeep(true);                     // started here, during the tap: iOS allows audio to start only then
     App.follow = true;
     if (typeof hideFollowChip === 'function') hideFollowChip();
     setCur(i, { scroll: true, keepResume: true });
     const go = () => {
       if (gen !== this.gen) return;
+      this.runAt = performance.now();
       this.enqueue(i, fromChar, gen);
       this.fill(gen);
       this.armWatchdog(gen);
@@ -2422,6 +2512,7 @@ const Player = {
   onStart(i, fromChar, text) {
     this.baseChar = fromChar; this.lastChar = fromChar;
     this.activity = this.uttStart = performance.now();
+    if (++this.nStarted === 1) this.firstAt = this.uttStart;
     this.uttWords = countWords(text);
     if (App.cur !== i) setCur(i, { scroll: true, keepResume: true });
     Media.update();
@@ -2450,6 +2541,7 @@ const Player = {
     this.state = 'paused';
     this.resumeChar = this.lastChar || 0;
     try { speechSynthesis.cancel(); } catch (e) { /* ignore */ }
+    NPlay.speechKeep(false);
     clearInterval(this.wd);
     clearWordHL();
     syncPlayUI(); Wake.off(); Media.update(); savePos();
@@ -2458,12 +2550,14 @@ const Player = {
     NPlay.halt();
     this.gen++; this.state = 'idle'; this.resumeChar = 0;
     try { if (window.speechSynthesis) speechSynthesis.cancel(); } catch (e) { /* ignore */ }
-    clearInterval(this.wd); clearWordHL(); syncPlayUI(); Wake.off();
+    NPlay.speechKeep(false);
+    clearInterval(this.wd); clearWordHL(); syncPlayUI(); Wake.off(); Media.update();
   },
   finish() {
     NPlay.halt();
     this.gen++; this.state = 'idle'; this.resumeChar = 0;
-    clearInterval(this.wd); clearWordHL(); syncPlayUI(); Wake.off(); savePos();
+    NPlay.speechKeep(false);
+    clearInterval(this.wd); clearWordHL(); syncPlayUI(); Wake.off(); Media.update(); savePos();
     toast('End of the proposal');
     if (typeof onFinished === 'function') onFinished();
   },
@@ -2481,7 +2575,29 @@ const Player = {
     const j = nextPlayable(App.cur + dir, dir);
     if (j < 0) return;
     if (this.state === 'playing') this.play(j, 0);
-    else { this.resumeChar = 0; setCur(j, { scroll: true }); }
+    else { this.resumeChar = 0; setCur(j, { scroll: true }); Media.update(); }
+  },
+  // Where reading is in the proposal, in seconds at the chosen speed (estimated from word counts), for the lock
+  // screen's progress bar.
+  where() {
+    if (!App.model) return null;
+    const suf = suffixWords(), k = App.S.spw / App.S.rate, duration = suf[0] * k;
+    if (!(duration > 0)) return null;
+    const position = clamp((suf[0] - suf[clamp(App.cur, 0, App.model.sents.length)]) * k, 0, duration);
+    return { duration, position, playbackRate: 1 };
+  },
+  // The lock screen's progress bar was dragged to `t` seconds: go to the sentence read at that time.
+  seekTo(t) {
+    if (!App.model) return;
+    const suf = suffixWords(), n = App.model.sents.length;
+    const left = suf[0] - Math.max(0, t) * App.S.rate / App.S.spw;      // words still to read at that time
+    let lo = 0, hi = n;                                                // first sentence starting after it
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (suf[mid] < left) hi = mid; else lo = mid + 1; }
+    let j = nextPlayable(Math.max(0, lo - 1), 1);
+    if (j < 0) j = nextPlayable(n - 1, -1);
+    if (j < 0) return;
+    if (this.state === 'playing') this.play(j, 0);
+    else { this.resumeChar = 0; setCur(j, { scroll: true }); Media.update(); }
   },
   armWatchdog(gen) {
     clearInterval(this.wd);
@@ -2974,7 +3090,7 @@ const NV_KEEPALIVE = silentWav(16000, 8000);        // 2 s, looped while waiting
 // ── Playback of natural-voice clips ────────────────────────────────────────
 const NPlay = {
   el: null, active: false, idx: -1, clip: null, base: 0, raf: 0, lastW: -1, waiting: false, quiet: false,
-  started: 0, silentUrl: null, gen: 0,
+  started: 0, silentUrl: null, gen: 0, speechAlive: false, speechOff: false,
 
   audio() {
     if (this.el) return this.el;
@@ -2999,6 +3115,7 @@ const NPlay = {
     this.unlocked = true;
     if (!this.silentUrl) this.silentUrl = URL.createObjectURL(new Blob([NV_SILENT], { type: 'audio/wav' }));
     this.quiet = true;
+    a.loop = false;
     a.src = this.silentUrl;
     const p = a.play();
     if (p && p.catch) p.catch(() => { this.unlocked = false; });
@@ -3013,6 +3130,52 @@ const NPlay = {
     this.alive = true; this.quiet = true;
     a.loop = true; a.src = this.aliveUrl; a.playbackRate = 1;
     const p = a.play(); if (p && p.catch) p.catch(() => {});
+  },
+  // Device voices: the browser speaks each sentence, so the page itself plays no audio, and an iPhone stops running
+  // a hidden page that plays none: the sentence being spoken finishes and the next one never starts. While a device
+  // voice reads, this element loops a silent track, so the page keeps running with the screen off or in another
+  // app, and the lock screen and headphone controls reach it (Media).
+  speechKeep(on) {
+    const a = this.el;
+    if (!on) {
+      if (!this.speechAlive) return;
+      this.speechAlive = false;
+      if (this.active || !a) return;            // the natural voice has the element now
+      this.pausing = true;
+      try { a.pause(); } catch (e) { /* ignore */ }
+      this.pausing = false;
+      return;
+    }
+    if (this.speechOff || this.active) return;
+    const el = this.audio();
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { /* ignore */ }
+    if (!this.aliveUrl) this.aliveUrl = URL.createObjectURL(new Blob([NV_KEEPALIVE], { type: 'audio/wav' }));
+    this.speechAlive = true;
+    if (!el.paused && el.loop && el.src === this.aliveUrl) return;        // already looping
+    this.quiet = true;
+    el.loop = true; el.src = this.aliveUrl; el.playbackRate = 1;
+    const p = el.play();
+    if (p && p.catch) p.catch((e) => {
+      if (e && e.name === 'AbortError') return;
+      if (this.speechAlive && !this.refusedLogged) { this.refusedLogged = true; Diag.log('audio: the background track did not start (' + ((e && e.name) || e) + '); a device voice may stop when the screen locks'); }
+    });
+  },
+  // The silent track under a device voice stopped, and not by this app: headphones taken out, a call, another app
+  // started audio. Pause the reading too, as other audio apps do (and so it does not go on through the speaker).
+  // One exception: Safari on iOS 27.0 to 27.2 pauses a page's audio when a device voice starts speaking (WebKit bug
+  // 218815). That shows as a pause just as the first sentence starts; then the reading goes on without the track.
+  speechPaused() {
+    const a = this.el, P = Player;
+    if (this.pausing || !a || !a.paused || this.active || P.state !== 'playing') return;
+    this.speechAlive = false;
+    const t0 = P.firstAt || P.runAt || 0;
+    if (P.nStarted <= 1 && t0 && performance.now() - t0 < 1500) {
+      this.speechOff = true;
+      Diag.log('audio: the browser paused the background track when the device voice started; a device voice may stop when the screen locks (until the page is reloaded)');
+      return;
+    }
+    Diag.log('audio: paused from outside the app' + (document.hidden ? ' (page hidden)' : '') + ' (device voice)');
+    P.pause();
   },
   setWaiting(on) {
     if (this.waiting === on) return;
@@ -3061,6 +3224,7 @@ const NPlay = {
     if (i !== from) fromChar = 0;
     try { if (window.speechSynthesis && (speechSynthesis.speaking || speechSynthesis.pending)) speechSynthesis.cancel(); } catch (e) { /* ignore */ }
     const gen = ++P.gen;
+    this.speechAlive = false;                   // the element plays this voice's clips from here on
     this.active = true;
     P.state = 'playing'; P.lastChar = fromChar; P.resumeChar = 0;
     App.follow = true;
@@ -3089,7 +3253,9 @@ const NPlay = {
     if (!sp || !voice) { this.next(i, gen); return; }
     let clip = NV.peek(sp.text, voice);
     if (!clip && NV.stored(sp.text, voice)) {          // made earlier and kept on this device: no model needed
+      if (document.hidden) this.keepAlive(true);       // screen off: keep audio playing while it is read, or iOS stops the page
       clip = await NV.load(sp.text, voice);
+      if (!this.waiting) this.keepAlive(false);
       if (gen !== Player.gen) return;
     }
     if (!clip) {
@@ -3268,6 +3434,7 @@ const NPlay = {
   },
   onPauseEvent() {
     const a = this.el;
+    if (!this.active && this.speechAlive) { this.speechPaused(); return; }
     if (!this.active || this.quiet || this.waiting || !a || a.ended || Player.state !== 'playing') return;
     if (!a.paused) return;                      // a source change (silent track to the next clip), not a pause
     if (this.pausing) return;
@@ -3677,7 +3844,7 @@ function mergeNotes(target, incoming, model) {
   const byId = new Map(target.items.map((x) => [x.id, x]));
   let added = 0;
   for (const raw of incoming.items || []) {
-    const x = { id: String(raw.id || uid()), a: raw.a | 0, b: raw.b | 0, tag: TAGS[raw.tag] ? raw.tag : 'note', major: !!raw.major, text: String(raw.text || ''), quote: String(raw.quote || ''), created: +raw.created || Date.now(), updated: +raw.updated || Date.now() };
+    const x = { id: String(raw.id || uid()), a: raw.a | 0, b: raw.b | 0, tag: TAGS[raw.tag] ? raw.tag : 'note', major: !!raw.major, ...(typeof raw.crit === 'string' && raw.crit ? { crit: raw.crit } : {}), text: String(raw.text || ''), quote: String(raw.quote || ''), created: +raw.created || Date.now(), updated: +raw.updated || Date.now() };
     if (x.b < x.a) x.b = x.a;
     if (!anchorItem(model, x, norm)) continue;
     const ex = byId.get(x.id);
@@ -3685,7 +3852,9 @@ function mergeNotes(target, incoming, model) {
     else if (x.updated > (ex.updated || 0)) Object.assign(ex, x);
   }
   const rv = incoming.review || {};
-  for (const k of ['rating', 'summary', 'general']) if (rv[k] && !target.review[k]) target.review[k] = String(rv[k]);
+  for (const k of REVIEW_TEXT_KEYS) if (rv[k] && !target.review[k]) target.review[k] = String(rv[k]);
+  if (REVIEW_TYPES[rv.type] && !target.review.type) target.review.type = rv.type;
+  if (rv.grades && typeof rv.grades === 'object' && !target.review.grades) target.review.grades = Object.fromEntries(Object.entries(rv.grades).filter(([, v]) => typeof v === 'number' && v >= 1 && v <= 5));
   if (incoming.heard && !target.heard) { const h = b64dec(incoming.heard); if (h && h.length === ((model.sents.length + 7) >> 3)) target.heard = h; }
   return { added };
 }
@@ -3849,6 +4018,7 @@ async function closeDoc() {
   closingDoc = true;
   try {
     Player.stop();
+    Media.clear();
     NV.unload('left the proposal');
     App.S.lastDoc = '';
     await flushSettings();                        // stored before anything else, so a reload from here shows the library
@@ -3964,7 +4134,7 @@ function syncPlayUI() {
   if (els.lsPlay) { els.lsPlay.innerHTML = ICON(icon); els.lsPlay.setAttribute('aria-label', playing ? 'Pause' : 'Play'); }
   document.body.classList.toggle('playing', playing);
   if (els.speedBtn) els.speedBtn.textContent = fmtRate(App.S.rate);
-  if (els.lsHint) els.lsHint.textContent = playing ? (Wake.failed || !('wakeLock' in navigator) ? 'Keep the screen on while listening: speech pauses when the phone locks.' : 'The screen stays on while playing.') : 'Paused';
+  if (els.lsHint) els.lsHint.textContent = !playing ? 'Paused' : App.S.wakeLock && 'wakeLock' in navigator && !Wake.failed ? 'The screen stays on while playing. Listening also goes on if you lock it.' : 'Listening goes on if you lock the screen.';
   if (!playing) hideFollowChip();
 }
 function syncSleep() {
@@ -4082,9 +4252,11 @@ function openHLEditor(it) {
   const M = App.model, n = M.sents.length;
   const render = () => {
     const sw = it.tag === 'strength' || it.tag === 'weakness';
+    const type = reviewTypeOf(), RT = REVIEW_TYPES[type], crits = sw ? RT.crits : [];
     const b = openSheet(`${TAGS[it.tag].label} highlight`, `<div class="stack">
       <div class="tagbtns">${TAG_ORDER.map((t) => `<button type="button" class="tagbtn" data-tag="${t}" aria-pressed="${it.tag === t}">${TAGS[t].label}</button>`).join('')}</div>
-      ${sw ? `<label class="toggle"><span>Major ${it.tag}<small>Listed first in the notes report</small></span><input type="checkbox" id="hlMajor" ${it.major ? 'checked' : ''}></label>` : ''}
+      ${crits.length ? `<div><div class="sec-h">Criterion</div><div class="seg" role="group" aria-label="Criterion">${crits.map((c) => `<button type="button" data-crit="${c.key}" aria-pressed="${critOf(it, type) === c.key}">${esc(c.label)}</button>`).join('')}</div></div>` : ''}
+      ${sw ? `<label class="toggle"><span>Major ${it.tag}<small>${RT.majorMinor ? 'Otherwise minor. A major finding significantly changes the likelihood of success.' : 'Listed first in the notes report'}</small></span><input type="checkbox" id="hlMajor" ${it.major ? 'checked' : ''}></label>` : ''}
       <div class="row between"><span class="hint">Page ${M.sents[it.a].p} · ${plural(it.b - it.a + 1, 'sentence', 'sentences')}</span>
         <span class="row"><button type="button" class="mini" data-act="shrink" ${it.b <= it.a ? 'disabled' : ''}>Shorten</button><button type="button" class="mini" data-act="extend" ${it.b >= n - 1 ? 'disabled' : ''}>Add next sentence</button></span></div>
       <p class="quote">${M.sents.slice(it.a, it.b + 1).map((s) => fmt(s.t)).join(' ')}</p>
@@ -4095,6 +4267,8 @@ function openHLEditor(it) {
     b.onclick = (e) => {
       const tag = e.target.closest('[data-tag]')?.dataset.tag;
       const act = e.target.closest('[data-act]')?.dataset.act;
+      const crit = e.target.closest('[data-crit]')?.dataset.crit;
+      if (crit) { updHL(it, { crit }); render(); return; }
       if (tag && tag !== it.tag) { updHL(it, { tag }); render(); }
       else if (act === 'extend' && it.b < n - 1) { updHL(it, { b: it.b + 1 }); render(); }
       else if (act === 'shrink' && it.b > it.a) { updHL(it, { b: it.b - 1 }); render(); }
@@ -4109,9 +4283,13 @@ function openHLEditor(it) {
 
 // ── Voice & speed ──────────────────────────────────────────────────────────
 function voiceTip() {
-  if (IS_IOS) return 'For a more natural voice on iPhone: Settings → Accessibility → Spoken Content → Voices → English, download an Enhanced or Premium voice, then reload this page. iOS does not always offer every downloaded voice to web pages.';
+  // Safari (and every iPhone browser) gives web pages only the voices built into the system: Enhanced and Premium
+  // voices downloaded in Settings are left out to reduce fingerprinting (WebKit, PlatformSpeechSynthesizerIOS).
+  if (IS_IOS) return 'Safari offers web pages only the voices built into iOS: Enhanced and Premium voices downloaded in Settings do not appear here (an iOS privacy rule). For a more natural voice, use Natural (on device).';
   if (IS_ANDROID) return 'For more voices on Android: Settings → System → Languages → Text-to-speech output, install voice data for your speech engine, then reload this page.';
-  return 'For more voices on a Mac: System Settings → Accessibility → Spoken Content → System voice → Manage Voices, then reload this page.';
+  if (/Windows/.test(UA)) return 'For more voices on Windows: Settings → Time & language → Speech → Manage voices → Add voices, then reload this page.';
+  if (/Macintosh/.test(UA)) return 'For more voices on a Mac: System Settings → Accessibility → Spoken Content → System voice → Manage Voices, then reload this page. Safari may not list voices you download.';
+  return 'Voices come from your operating system; add more in its speech settings, then reload this page.';
 }
 function sleepPressed(k) { return k === 'off' ? !Sleep.mode : k === 'section' ? Sleep.mode === 'section' : false; }
 function setRate(r, restart = true) {
@@ -4291,32 +4469,111 @@ function onNaturalChanged() {
 }
 
 // ── Notes panel, export ────────────────────────────────────────────────────
-function noteCard(it) {
-  const M = App.model, s = M.sents[it.a];
+// ── Review types (see REVIEW_TYPES) ────────────────────────────────────────
+// Guessed from the proposal at parse time (model.reviewHint); proposals parsed before that guess from their text.
+const reviewGuessCache = new WeakMap();
+function reviewGuess(M) {
+  if (!M) return '';
+  if (typeof M.reviewHint === 'string') return M.reviewHint;
+  if (!reviewGuessCache.has(M)) reviewGuessCache.set(M, reviewKindHint(M.sents.filter((x) => x.p <= 3).map((x) => stripMarks(x.t)).join('\n')));
+  return reviewGuessCache.get(M);
+}
+// The review type of a proposal: chosen in Notes, else guessed from the proposal, else the type chosen last.
+function reviewTypeOf(N = App.notes, M = App.model) {
+  const t = N && N.review && N.review.type;
+  if (REVIEW_TYPES[t]) return t;
+  const g = reviewGuess(M);
+  if (REVIEW_TYPES[g]) return g;
+  return REVIEW_TYPES[App.S.reviewType] ? App.S.reviewType : 'funding';
+}
+// The criterion a strength or weakness at sentence i falls under: from the sections it sits in (a sentence under
+// "Travel" inside "Budget Justification" counts as budget; a sibling section does not count), else the first one.
+function autoCrit(type, i) {
+  const T = REVIEW_TYPES[type], M = App.model;
+  if (!T || !T.crits.length || !M || !M.sents[i]) return '';
+  const H = headInfo(M), bud = T.crits.find((c) => c.budget);
+  if (bud && H.budget.has(M.sents[i].p)) return bud.key;
+  let k = H.heads.length - 1;
+  while (k >= 0 && H.heads[k].s0 > i) k--;
+  let depth = Infinity;
+  for (; k >= 0; k--) {
+    const B = H.heads[k], z = H.zone(B);
+    if (z === 'budget') { if (bud) return bud.key; continue; }
+    if (z === 'cover') break;
+    const d = H.depthOf(B);
+    if (d >= depth) continue;
+    depth = d;
+    const t = H.textOf(B);
+    const c = T.crits.find((x) => x.sec && x.sec.test(t));
+    if (c) return c.key;
+    if (d <= 1) break;
+  }
+  return T.crits[0].key;
+}
+function critOf(it, type) {
+  const T = REVIEW_TYPES[type];
+  if (!T || !T.crits.length || (it.tag !== 'strength' && it.tag !== 'weakness')) return '';
+  return T.crits.some((c) => c.key === it.crit) ? it.crit : autoCrit(type, it.a);
+}
+const critLabel = (type, key) => { const c = (REVIEW_TYPES[type] || { crits: [] }).crits.find((x) => x.key === key); return c ? c.label : ''; };
+// JWST: the three criterion grades (1 best to 5, one decimal) and their average, once all three are given.
+function gradeAvg(g, T) {
+  const v = (T.grades || []).map(([k]) => g && g[k]).filter((x) => typeof x === 'number' && x >= 1 && x <= 5);
+  if (!T.grades || v.length !== T.grades.length) return null;
+  return (v.reduce((s, x) => s + x, 0) / v.length).toFixed(2).replace(/0$/, '');
+}
+const adjName = (r) => { const a = ADJ_RATINGS.find(([k]) => k === r); return a ? `${a[1]} (${a[0]})` : r; };
+const rvId = (k) => 'rv' + k[0].toUpperCase() + k.slice(1);
+function reviewRatingHtml(T, R) {
+  if (T.rating === 'grades') {
+    const g = R.grades || {}, avg = gradeAvg(g, T);
+    return `<div class="field"><label>Grades (1 best, 5 weakest; one decimal at most)</label><div class="grades">${T.grades.map(([k, l]) => `<label class="grade"><span>${esc(l)}</span><input type="number" inputmode="decimal" min="1" max="5" step="0.1" data-grade="${k}" value="${typeof g[k] === 'number' ? g[k] : ''}"></label>`).join('')}</div>
+      <p class="hint" id="gradeAvg">${avg != null ? `Overall grade: ${avg}` : 'The overall grade is the average of the three.'}</p></div>`;
+  }
+  const chips = T.rating === 'adj' ? `<div class="seg rating" role="group" aria-label="${esc(T.ratingLabel)}">${ADJ_RATINGS.map(([k, full]) => `<button type="button" data-rating="${esc(k)}" aria-pressed="${R.rating === k}" title="${esc(full)}" aria-label="${esc(full)}">${esc(k)}</button>`).join('')}</div>` : '';
+  return `<div class="field"><label for="rvRating">${esc(T.ratingLabel)}</label>${chips}<input type="text" id="rvRating" value="${esc(R.rating || '')}" placeholder="${esc(T.rating === 'adj' ? 'Or type a rating' : T.ratingHint)}" autocomplete="off"></div>`;
+}
+
+function noteCard(it, type) {
+  const M = App.model, s = M.sents[it.a], cl = critLabel(type, critOf(it, type));
   return `<div class="ncard" style="--tc: var(--c-${it.tag})" data-id="${esc(it.id)}">
-    <div class="nhead"><span class="dot ${it.tag}"></span>${TAGS[it.tag].label}${it.major ? ' · Major' : ''}<span class="nhp">Page ${s.p}</span></div>
+    <div class="nhead"><span class="dot ${it.tag}"></span>${TAGS[it.tag].label}${it.major ? ' · Major' : ''}${cl ? ' · ' + esc(cl) : ''}<span class="nhp">Page ${s.p}</span></div>
     <div class="nq">${M.sents.slice(it.a, it.b + 1).map((x) => fmt(x.t)).join(' ')}</div>
     ${it.text.trim() ? `<div class="nt">${esc(it.text)}</div>` : ''}
     <div class="nact"><button type="button" class="mini" data-act="go">Show</button><button type="button" class="mini" data-act="playit">Play</button><button type="button" class="mini" data-act="edit">Edit</button></div>
   </div>`;
 }
-function openNotesSheet(filter = 'all') {
-  const N = App.notes;
+function openNotesSheet(filter = 'all', keep = false) {
+  const N = App.notes, R = N.review, type = reviewTypeOf(), T = REVIEW_TYPES[type];
+  const how = REVIEW_TYPES[R.type] ? 'chosen' : reviewGuess(App.model) ? 'guessed' : 'default';
+  const scroll = keep && !els.sheet.hidden ? els.sheetBody.scrollTop : 0;
   const items = N.items.slice().sort((p, q) => p.a - q.a || p.created - q.created).filter((it) => filter === 'all' || it.tag === filter);
   const counts = Object.fromEntries(TAG_ORDER.map((t) => [t, N.items.filter((x) => x.tag === t).length]));
+  const why = how === 'guessed' ? `Guessed from the proposal; tap another type to change it. ` : how === 'default' ? 'Choose the type of review: it sets the criteria, the rating, and how the export is laid out. ' : '';
   const b = openSheet('Notes', `<div class="stack">
     <div class="seg" role="group" aria-label="Filter">${[['all', `All ${N.items.length}`], ...TAG_ORDER.map((t) => [t, `${TAGS[t].plural} ${counts[t]}`])].map(([k, l]) => `<button type="button" data-f="${k}" aria-pressed="${filter === k}">${esc(l)}</button>`).join('')}</div>
-    ${items.length ? items.map(noteCard).join('') : `<p class="hint">${N.items.length ? 'Nothing in this category yet.' : 'No highlights yet. Tap any sentence to highlight it, or press Mark while listening.'}</p>`}
-    <div class="sec-h">Review summary</div>
-    <div class="field"><label for="rvRating">Rating or score</label><input type="text" id="rvRating" value="${esc(N.review.rating || '')}" placeholder="For example: Very Good, or 2.1" autocomplete="off"></div>
-    <div class="field"><label for="rvSummary">Summary of the proposal</label><textarea id="rvSummary" placeholder="What they propose to do, in a few sentences.">${esc(N.review.summary || '')}</textarea></div>
-    <div class="field"><label for="rvGeneral">Overall assessment</label><textarea id="rvGeneral" placeholder="Your overall view for the panel.">${esc(N.review.general || '')}</textarea></div>
+    ${items.length ? items.map((it) => noteCard(it, type)).join('') : `<p class="hint">${N.items.length ? 'Nothing in this category yet.' : 'No highlights yet. Tap any sentence to highlight it, or press Mark while listening.'}</p>`}
+    <div class="sec-h">Review</div>
+    <div class="seg" role="group" aria-label="Review type">${REVIEW_ORDER.map((k) => `<button type="button" data-rt="${k}" aria-pressed="${k === type}">${esc(REVIEW_TYPES[k].label)}</button>`).join('')}</div>
+    ${why || T.tip ? `<p class="hint" id="rtHint">${esc(why + T.tip)}</p>` : ''}
+    ${reviewRatingHtml(T, R)}
+    ${T.fields.map(([k, label, ph]) => `<div class="field"><label for="${rvId(k)}">${esc(label)}</label><textarea id="${rvId(k)}" data-rv="${k}" placeholder="${esc(ph)}">${esc(R[k] || '')}</textarea></div>`).join('')}
     <button type="button" class="btn primary" data-act="export">${ICON('export')}Export notes</button>
   </div>`, { tall: true });
   els.sheet.dataset.kind = 'notes';
+  if (scroll) els.sheetBody.scrollTop = scroll;
   b.onclick = (e) => {
     const f = e.target.closest('[data-f]')?.dataset.f;
     if (f) { openNotesSheet(f); return; }
+    const rt = e.target.closest('[data-rt]')?.dataset.rt;
+    if (rt && REVIEW_TYPES[rt]) { R.type = rt; App.S.reviewType = rt; saveSettings(); saveNotesSoon(); openNotesSheet(filter, true); return; }
+    const rating = e.target.closest('[data-rating]')?.dataset.rating;
+    if (rating) {
+      R.rating = R.rating === rating ? '' : rating;
+      const inp = $id('rvRating'); if (inp) inp.value = R.rating;
+      b.querySelectorAll('[data-rating]').forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.rating === R.rating)));
+      saveNotesSoon(); return;
+    }
     const act = e.target.closest('[data-act]')?.dataset.act; if (!act) return;
     if (act === 'export') { openExportSheet(); return; }
     const id = e.target.closest('.ncard')?.dataset.id; const it = N.items.find((x) => x.id === id); if (!it) return;
@@ -4325,8 +4582,19 @@ function openNotesSheet(filter = 'all') {
     else if (act === 'edit') openHLEditor(it);
   };
   b.oninput = (e) => {
-    const k = { rvRating: 'rating', rvSummary: 'summary', rvGeneral: 'general' }[e.target.id];
-    if (k) { N.review[k] = e.target.value; saveNotesSoon(); }
+    const t = e.target;
+    if (t.id === 'rvRating') { R.rating = t.value; b.querySelectorAll('[data-rating]').forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.rating === R.rating))); saveNotesSoon(); return; }
+    if (t.dataset.rv) { R[t.dataset.rv] = t.value; saveNotesSoon(); return; }
+    if (t.dataset.grade) {
+      const v = parseFloat(String(t.value).replace(',', '.'));
+      R.grades = R.grades && typeof R.grades === 'object' ? R.grades : {};
+      if (t.value === '') delete R.grades[t.dataset.grade];
+      else if (v >= 1 && v <= 5) R.grades[t.dataset.grade] = Math.round(v * 10) / 10;
+      const avg = gradeAvg(R.grades, T);
+      R.rating = avg != null ? avg : '';
+      const h = $id('gradeAvg'); if (h) h.textContent = avg != null ? `Overall grade: ${avg}` : 'The overall grade is the average of the three.';
+      saveNotesSoon();
+    }
   };
 }
 function flash(i) { const el = App.spans[i]; if (!el) return; el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash'); }
@@ -4377,7 +4645,7 @@ async function autoSaveNotesFile(why) {
   const n = App.notes, doc = App.doc;
   if (!App.S.autoFile || !doc || !n) return;
   const rv = n.review || {};
-  if (!n.items.length && !rv.rating && !(rv.summary || '').trim() && !(rv.general || '').trim()) return;
+  if (!n.items.length && !REVIEW_TEXT_KEYS.some((k) => String(rv[k] || '').trim())) return;
   const sig = notesSig(n);
   if (sig === n.filedSig) return;
   notesFileJob = (async () => {
@@ -4536,7 +4804,11 @@ function headNumbering(t) {
   if (m) return { style: 'a', d: 1 + (m[2] ? m[2].split('.').length : 0) };
   return null;
 }
-function tocOutline(M) {
+// Headings of a proposal with their outline depth, its form and budget pages, and where each page starts; shared by
+// the Sections outline and by filing highlights under review criteria. Cached per model.
+const headInfoCache = new WeakMap();
+function headInfo(M) {
+  if (headInfoCache.has(M)) return headInfoCache.get(M);
   const heads = M.blocks.filter((B) => B.k === 'h' && !B.ref);
   const textOf = (B) => stripMarks(M.sents[B.s0].t).trim();
   const forms = new Set(M.forms || []);
@@ -4550,19 +4822,8 @@ function tocOutline(M) {
   }
   const zone = (B) => (budget.has(B.p) || (forms.has(B.p) && BUDGET_HEAD.test(textOf(B))) ? 'budget' : B.p <= cover ? 'cover' : 'body');
   const firstOn = (p) => { const a = M.byPage[p]; if (a && a.length) return a[0]; const j = M.sents.findIndex((s) => s.p >= p); return j < 0 ? 0 : j; };
-  const items = [];
-  let g = null;
-  for (const B of heads) {
-    const z = zone(B);
-    if (z === 'body') { g = null; items.push({ kind: 'head', B, kids: [] }); continue; }
-    if (!g || g.zone !== z) { g = { kind: 'group', zone: z, kids: [] }; items.push(g); }
-    g.kids.push(B);
-  }
-  const coverPages = [];
-  for (let p = 1; p <= cover; p++) if (!budget.has(p)) coverPages.push(p);
-  if (coverPages.length && !(items[0] && items[0].zone === 'cover')) items.unshift({ kind: 'group', zone: 'cover', kids: [] });
   // Outline depth of the proposal's own headings: numbering first ("2.1" sits under "2"), then type size.
-  const body = items.filter((x) => x.kind === 'head').map((x) => x.B);
+  const body = heads.filter((B) => zone(B) === 'body');
   const rOf = (B) => (typeof B.r === 'number' ? B.r : B.lvl === 1 ? 1.3 : 1.1);
   let topStyle = null;
   for (const B of body) { const n = headNumbering(textOf(B)); if (n) { topStyle = n.style; break; } }
@@ -4576,6 +4837,23 @@ function tocOutline(M) {
     if (TOP_HEAD.test(t) || (t === t.toUpperCase() && /[A-Z]{3}/.test(t))) return 1;
     return rOf(B) >= topR - 0.03 ? 1 : 2;
   };
+  const H = { heads, textOf, forms, cover, budget, zone, firstOn, body, titleB, depthOf };
+  headInfoCache.set(M, H);
+  return H;
+}
+function tocOutline(M) {
+  const { heads, textOf, cover, budget, zone, firstOn, titleB, depthOf } = headInfo(M);
+  const items = [];
+  let g = null;
+  for (const B of heads) {
+    const z = zone(B);
+    if (z === 'body') { g = null; items.push({ kind: 'head', B, kids: [] }); continue; }
+    if (!g || g.zone !== z) { g = { kind: 'group', zone: z, kids: [] }; items.push(g); }
+    g.kids.push(B);
+  }
+  const coverPages = [];
+  for (let p = 1; p <= cover; p++) if (!budget.has(p)) coverPages.push(p);
+  if (coverPages.length && !(items[0] && items[0].zone === 'cover')) items.unshift({ kind: 'group', zone: 'cover', kids: [] });
   const out = [];
   let parent = null;
   for (const x of items) {
@@ -4696,6 +4974,8 @@ function jumpTo(i, play) {
 }
 
 // ── Settings, more, about ──────────────────────────────────────────────────
+// The guide for colleagues: README and docs/ in the public repository that also hosts the website.
+const GUIDE_URL = 'https://github.com/astrowagner/pdfreviewer';
 function toggleRow(key, label, small) {
   return `<label class="toggle"><span>${label}${small ? `<small>${small}</small>` : ''}</span><input type="checkbox" data-set="${key}" ${App.S[key] ? 'checked' : ''}></label>`;
 }
@@ -4714,7 +4994,7 @@ function openSettingsSheet() {
     </div>
     <div><div class="sec-h">While listening</div>
       ${toggleRow('autoScroll', 'Follow the spoken sentence', 'Scrolls the text as it is read')}
-      ${toggleRow('wakeLock', 'Keep the screen on while playing', 'Speech usually stops when a phone locks')}
+      ${toggleRow('wakeLock', 'Keep the screen on while playing', 'To follow the text. Listening also goes on with the screen locked.')}
     </div>
     <div><div class="sec-h">Text</div>
       <div class="field"><label for="fsIn">Text size <span id="fsLbl">${S.fontSize}px</span></label><input type="range" id="fsIn" min="14" max="28" step="1" value="${S.fontSize}"></div>
@@ -4738,6 +5018,11 @@ function openSettingsSheet() {
     <div><div class="sec-h">Diagnostics</div>
       <p class="hint">A log of recent events on this device, with timings and error messages but no proposal text or file names. Copy it to report a problem.</p>
       <div class="row"><button type="button" class="btn" data-act="diag-copy">Copy diagnostic log</button><button type="button" class="btn" data-act="diag-clear">Clear log</button></div>
+      <p class="hint" id="buildStamp">Version: ${esc(BUILD)}</p>
+    </div>
+    <div><div class="sec-h">Help</div>
+      <p class="hint">The guide covers listening, highlights and notes, exports, saving and moving between devices, iPhone tips, and troubleshooting. It opens on GitHub.</p>
+      <div class="row"><a class="btn" href="${GUIDE_URL}" target="_blank" rel="noopener noreferrer">User guide</a><a class="btn" href="${GUIDE_URL}/blob/main/docs/privacy.md" target="_blank" rel="noopener noreferrer">Privacy details</a></div>
     </div>
     <div><div class="sec-h">Privacy</div>
       <p class="hint">This app has no server. It reads PDFs inside this page, speaks with your device's built-in voices or with the natural voice (an AI model that runs inside this page after a one-time download of its files from this page), and stores everything in this browser. With the natural voice, or with “On-device voices only” on, proposal text never leaves the device.</p>
@@ -5045,10 +5330,22 @@ function wireUI() {
     else if (k === '+' || k === '=') setRate(App.S.rate + 0.1);
     else if (k === '-' || k === '_') setRate(App.S.rate - 0.1);
   });
+  let hidPlaying = false;                         // the page was hidden while playing (logged, to check background playback)
   document.addEventListener('visibilitychange', () => {
     Alive.mark();
-    if (document.hidden) { if (Player.playing) Player.fill(Player.gen); if (IS_IOS) NV.trim(); flushSettings(); savePos(); saveNotes(); }
-    else if (Player.playing) { Wake.on(); setCur(App.cur, { scroll: true, keepResume: true }); }
+    if (document.hidden) {
+      hidPlaying = Player.playing;
+      if (Player.playing) {
+        Player.fill(Player.gen);
+        const a = NPlay.el, audio = !!a && !a.paused;
+        Diag.log('screen off or another app while playing (' + (NPlay.active ? 'natural voice' : 'device voice') + '; page audio ' + (audio ? 'playing' : 'not playing') + ')');
+      }
+      if (IS_IOS) NV.trim(); flushSettings(); savePos(); saveNotes();
+    } else {
+      if (hidPlaying) Diag.log('back in the app (' + (Player.playing ? 'still playing' : Player.state === 'paused' ? 'paused' : 'stopped') + ')');
+      hidPlaying = false;
+      if (Player.playing) { Wake.on(); setCur(App.cur, { scroll: true, keepResume: true }); }
+    }
   });
   window.addEventListener('pagehide', () => { Alive.set(false); flushSettings(); savePos(); saveNotes(); NVGuard.disarm(); });
   window.addEventListener('resize', debounce(() => { if (App.view === 'page') PageView.renderVisible(); }, 300));
@@ -5078,37 +5375,73 @@ function cleanText(s, font) {
   return t;
 }
 
-function reportGroups(items) {
-  const out = [];
-  for (const tag of TAG_ORDER) {
-    const its = items.filter((x) => x.tag === tag).sort((p, q) => p.a - q.a);
-    if (!its.length) continue;
-    if ((tag === 'strength' || tag === 'weakness') && its.some((x) => x.major)) {
-      const maj = its.filter((x) => x.major), min = its.filter((x) => !x.major);
-      if (maj.length) out.push({ tag, title: 'Major ' + TAGS[tag].plural.toLowerCase(), items: maj });
-      if (min.length) out.push({ tag, title: 'Minor ' + TAGS[tag].plural.toLowerCase(), items: min });
-    } else out.push({ tag, title: TAGS[tag].plural, items: its });
-  }
-  return out;
-}
 function shortQuote(it, max) {
   const q = quoteOf(App.model, it.a, it.b).replace(/\s+/g, ' ').trim();
   return q.length > max ? q.slice(0, max - 1).replace(/\s+\S*$/, '') + '…' : q;
 }
 
+// The review laid out like the program's form (REVIEW_TYPES): rating lines, then sections holding text or groups of
+// strengths and weaknesses (major first where it applies), then the reviewer's own questions and notes.
+function reviewOutline() {
+  const M = App.model, N = App.notes, R = N.review || {};
+  const type = reviewTypeOf(N, M), T = REVIEW_TYPES[type];
+  const field = (k) => String(R[k] || '').trim();
+  const labelOf = (k) => (T.fields.find(([f]) => f === k) || [k, k])[1];
+  const rating = [];
+  if (T.rating === 'grades') {
+    const g = R.grades || {}, parts = T.grades.filter(([k]) => typeof g[k] === 'number').map(([k, l]) => `${l} ${g[k].toFixed(1)}`);
+    const avg = gradeAvg(g, T);
+    if (parts.length) rating.push(['Grades', parts.join(' · ') + (avg != null ? ` · overall ${avg}` : '')]);
+  } else if (field('rating')) rating.push([T.ratingLabel, T.rating === 'adj' ? adjName(field('rating')) : field('rating')]);
+  const sec = [];
+  const text = (k) => { if (field(k)) sec.push({ h: labelOf(k), text: field(k) }); };
+  const groups = (its, split) => {
+    const subs = [];
+    for (const tag of ['strength', 'weakness']) {
+      const xs = its.filter((x) => x.tag === tag).sort((p, q) => p.a - q.a);
+      if (!xs.length) continue;
+      const maj = xs.filter((x) => x.major), min = xs.filter((x) => !x.major);
+      if (split || maj.length) {
+        if (maj.length) subs.push({ h: 'Major ' + TAGS[tag].plural.toLowerCase(), tag, items: maj });
+        if (min.length) subs.push({ h: 'Minor ' + TAGS[tag].plural.toLowerCase(), tag, items: min });
+      } else subs.push({ h: TAGS[tag].plural, tag, items: xs });
+    }
+    return subs;
+  };
+  const sw = N.items.filter((x) => x.tag === 'strength' || x.tag === 'weakness');
+  text('summary');
+  if (type === 'nasa') text('general');                 // NASA's form: the summary of the evaluation comes first
+  if (T.crits.length) {
+    for (const c of T.crits) {
+      const subs = groups(sw.filter((x) => critOf(x, type) === c.key), !!T.majorMinor && c === T.crits[0]);
+      if (subs.length) sec.push({ h: c.label, subs });
+    }
+  } else {
+    for (const tag of ['strength', 'weakness']) {     // JWST feedback: Strengths, then Weaknesses
+      const subs = groups(sw.filter((x) => x.tag === tag), false);
+      if (subs.length) sec.push({ h: TAGS[tag].plural, subs: subs.length === 1 && subs[0].h === TAGS[tag].plural ? [{ ...subs[0], h: '' }] : subs });
+    }
+  }
+  if (type === 'nasa') { text('notePI'); text('toNASA'); }
+  else if (type === 'jwst') { text('resources'); text('general'); }
+  else text('general');
+  const own = ['question', 'note'].map((t) => ({ h: `Your ${TAGS[t].plural.toLowerCase()}`, tag: t, items: N.items.filter((x) => x.tag === t).sort((p, q) => p.a - q.a) })).filter((g) => g.items.length);
+  return { type, T, rating, sec, own };
+}
 function reviewText() {
-  const M = App.model, N = App.notes, D = App.doc;
-  const L = [`REVIEW NOTES: ${D.title || D.name}`];
-  if (N.review.rating) L.push(`Rating: ${N.review.rating}`);
+  const M = App.model, N = App.notes, D = App.doc, O = reviewOutline();
+  const L = [`REVIEW NOTES: ${D.title || D.name}`, `Review type: ${O.T.name}`];
+  for (const [k, v] of O.rating) L.push(`${k}: ${v}`);
   L.push('');
-  if (N.review.summary) L.push('SUMMARY', N.review.summary.trim(), '');
-  for (const g of reportGroups(N.items)) {
-    L.push(g.title.toUpperCase());
-    for (const it of g.items) L.push(`- ${it.text.trim() || '(no note)'} [p. ${M.sents[it.a].p}: "${shortQuote(it, 160)}"]`);
+  const line = (it) => `- ${it.text.trim() || '(no note)'} [p. ${M.sents[it.a].p}: "${shortQuote(it, 160)}"]`;
+  for (const s of O.sec) {
+    L.push(s.h.toUpperCase());
+    if (s.text) L.push(s.text);
+    for (const g of s.subs || []) { if (g.h) L.push(g.h); for (const it of g.items) L.push(line(it)); }
     L.push('');
   }
-  if (N.review.general) L.push('OVERALL ASSESSMENT', N.review.general.trim(), '');
-  if (!N.items.length && !N.review.summary && !N.review.general) L.push('(No highlights or notes yet.)');
+  for (const g of O.own) { L.push(`${g.h.toUpperCase()} (not part of the review)`); for (const it of g.items) L.push(line(it)); L.push(''); }
+  if (!O.sec.length && !O.own.length) L.push('(No highlights or notes yet.)');
   return L.join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
 }
 
@@ -5179,20 +5512,26 @@ async function buildReportDoc() {
   W.text(D.title || D.name, { font: F.b, size: 17, lh: 22, after: 4 });
   const stamp = new Date().toLocaleString([], { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   W.text(`${D.name} · ${plural(M.nPages, 'page', 'pages')} · ${heardPct()}% heard · ${plural(N.items.length, 'highlight', 'highlights')} · exported ${stamp}`, { size: 8.5, color: PdfWriter.GRAY, after: 12 });
-  if (N.review.rating) { W.text('Rating', { font: F.b, size: 10, after: 1 }); W.text(N.review.rating, { size: 11, after: 8 }); }
-  if (N.review.summary && N.review.summary.trim()) { W.heading('Summary'); W.text(N.review.summary.trim(), { after: 4 }); }
-  for (const g of reportGroups(N.items)) {
-    W.heading(`${g.title} (${g.items.length})`, col(g.tag));
-    for (const it of g.items) {
-      const s = M.sents[it.a];
-      W.ensure(46);
-      W.text(`Page ${s.p}${it.b > it.a ? ` · ${it.b - it.a + 1} sentences` : ''}${it.major ? ' · Major' : ''}`, { font: F.b, size: 8.5, color: PdfWriter.GRAY, after: 2 });
-      W.text('“' + shortQuote(it, 700) + '”', { font: F.i, size: 9.5, color: PdfWriter.GRAY, x: W.m + 12, bar: col(it.tag), after: it.text.trim() ? 3 : 12 });
-      if (it.text.trim()) W.text(it.text.trim(), { size: 10.5, x: W.m + 12, after: 12 });
+  const O = reviewOutline();
+  W.text(O.T.name, { font: F.b, size: 9.5, color: PdfWriter.GRAY, after: 10 });
+  for (const [k, v] of O.rating) { W.text(k, { font: F.b, size: 10, after: 1 }); W.text(v, { size: 11, after: 8 }); }
+  const itemBlock = (it) => {
+    const s = M.sents[it.a];
+    W.ensure(46);
+    W.text(`Page ${s.p}${it.b > it.a ? ` · ${it.b - it.a + 1} sentences` : ''}${it.major ? ' · Major' : ''}`, { font: F.b, size: 8.5, color: PdfWriter.GRAY, after: 2 });
+    W.text('“' + shortQuote(it, 700) + '”', { font: F.i, size: 9.5, color: PdfWriter.GRAY, x: W.m + 12, bar: col(it.tag), after: it.text.trim() ? 3 : 12 });
+    if (it.text.trim()) W.text(it.text.trim(), { size: 10.5, x: W.m + 12, after: 12 });
+  };
+  for (const sc of O.sec) {
+    W.heading(sc.h);
+    if (sc.text) W.text(sc.text, { after: 4 });
+    for (const g of sc.subs || []) {
+      if (g.h) { W.ensure(60); W.text(`${g.h} (${g.items.length})`, { font: F.b, size: 10.5, color: col(g.tag), after: 6 }); }
+      for (const it of g.items) itemBlock(it);
     }
   }
-  if (N.review.general && N.review.general.trim()) { W.heading('Overall assessment'); W.text(N.review.general.trim()); }
-  if (!N.items.length && !N.review.summary && !N.review.general) W.text('No highlights or notes yet.', { color: PdfWriter.GRAY });
+  for (const g of O.own) { W.heading(`${g.h} (${g.items.length}), not part of the review`, col(g.tag)); for (const it of g.items) itemBlock(it); }
+  if (!O.sec.length && !O.own.length) W.text('No highlights or notes yet.', { color: PdfWriter.GRAY });
   W.footers('Confidential: proposal review notes');
   doc.setTitle('Review notes: ' + (D.title || D.name));
   doc.setAuthor(App.S.reviewer || 'Reviewer');
@@ -5244,11 +5583,12 @@ async function exportAnnotatedBytes() {
   const pages = doc.getPages();
   for (const pg of pages) stripOurAnnots(doc, pg);
   stripOurAttachment(doc);
-  const ctx = doc.context, now = new Date(), author = App.S.reviewer || 'Reviewer';
+  const ctx = doc.context, now = new Date(), author = App.S.reviewer || 'Reviewer', rtype = reviewTypeOf(N, M);
   for (const it of N.items) {
     const byPage = new Map();
     for (let i = it.a; i <= it.b; i++) for (const r of (M.sents[i] || {}).r || []) { if (!byPage.has(r[0])) byPage.set(r[0], []); byPage.get(r[0]).push(r); }
-    const label = TAGS[it.tag].label + (it.major ? ' (major)' : '');
+    const cl = critLabel(rtype, critOf(it, rtype));
+    const label = TAGS[it.tag].label + (it.major ? ' (major)' : '') + (cl ? ' · ' + cl : '');
     const contents = it.text.trim() ? `${label}: ${it.text.trim()}` : label;
     let first = true;
     for (const [p, rects] of byPage) {
@@ -5338,7 +5678,7 @@ function notesFromJSON(j) {
   if (Array.isArray(j.pending) && j.pending.length) n.pending = j.pending;
   return n;
 }
-const hasNotes = (n) => !!(n && ((n.items && n.items.length) || (n.review && (n.review.rating || n.review.summary || n.review.general))));
+const hasNotes = (n) => !!(n && ((n.items && n.items.length) || (n.review && REVIEW_TEXT_KEYS.some((k) => n.review[k]))));
 // Merge saved notes into notes already on this device: nothing is dropped, and the newer copy of an item wins.
 function mergeNotesRaw(target, inc) {
   if (!target.review) target.review = { rating: '', summary: '', general: '' };
@@ -5348,7 +5688,9 @@ function mergeNotesRaw(target, inc) {
     if (!ex) { target.items.push(x); byId.set(x.id, x); }
     else if ((+x.updated || 0) > (+ex.updated || 0)) Object.assign(ex, x);
   }
-  for (const k of ['rating', 'summary', 'general']) if (inc.review[k] && !target.review[k]) target.review[k] = inc.review[k];
+  for (const k of REVIEW_TEXT_KEYS) if (inc.review[k] && !target.review[k]) target.review[k] = inc.review[k];
+  if (REVIEW_TYPES[inc.review.type] && !target.review.type) target.review.type = inc.review.type;
+  if (inc.review.grades && typeof inc.review.grades === 'object' && !target.review.grades) target.review.grades = inc.review.grades;
   if (inc.heard && target.heard instanceof Uint8Array && inc.heard.length === target.heard.length) { for (let i = 0; i < inc.heard.length; i++) target.heard[i] |= inc.heard[i]; }
   else if (inc.heard && !(target.heard instanceof Uint8Array)) target.heard = inc.heard;
   if (inc.pending) target.pending = (target.pending || []).concat(inc.pending);
@@ -5536,7 +5878,7 @@ async function boot() {
     } catch (e) { Diag.log('could not reopen the last proposal: ' + ((e && e.message) || e)); App.S.lastDoc = ''; flushSettings(); busy(false); showScreen('lib'); }
   }
   PDF.init().catch((e) => console.warn('PDF engine', e));
-  window.PL = { App, Player, PDF, Store, Voices, Sleep, parseDocument, splitSentences, buildRules, speechFor, stripMarks, fmt, importBytes, openDoc, closeDoc, exportReportBytes, exportAnnotatedBytes, reviewText, backupAll, restoreBackup, makeSamplePdf, setCur, addHL, saveState, buildStateBytes, stateSnapshot, ClipStore, openSentenceSheet, mergeNotes, toast, NV, NPlay, NVGuard, openVoiceSheet, useNatural, spoken, nextPlayable, Diag, diagText, Alive };
+  window.PL = { App, Player, PDF, Store, Voices, Sleep, parseDocument, splitSentences, buildRules, speechFor, stripMarks, fmt, importBytes, openDoc, closeDoc, exportReportBytes, exportAnnotatedBytes, reviewText, backupAll, restoreBackup, makeSamplePdf, setCur, addHL, saveState, buildStateBytes, stateSnapshot, ClipStore, openSentenceSheet, mergeNotes, toast, NV, NPlay, NVGuard, openVoiceSheet, useNatural, spoken, nextPlayable, Diag, diagText, Alive, reviewTypeOf, critOf, reviewOutline, REVIEW_TYPES };
   document.documentElement.dataset.ready = '1';
 }
 boot().catch((e) => {
