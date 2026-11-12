@@ -11,7 +11,9 @@ Everything runs in your browser. PDFs are read inside the page; the voice runs o
 ## Tips
 
 - On iPhone, use it in Safari from a bookmark. Web apps added to the Home Screen often stop audio when the screen locks.
-- Safari deletes a site's stored data after 7 days of Safari use without a visit to the site. Export your notes to keep them.
+- With the natural voice, **Voice › Prepare ahead** makes the speech for the rest of a proposal in advance and keeps it on your device, so it plays without waiting, also with the screen locked.
+- **Save state** keeps one file with your proposals, notes, place, and settings on your device; **Restore state** brings them back.
+- Safari deletes a site's stored data after 7 days of Safari use without a visit to the site. Save the state or export your notes to keep them.
 - Exported files go to Files › Downloads. Safari saves downloads to iCloud Drive unless you choose On My iPhone under Settings › Apps › Safari › Downloads.
 
 ## Contents

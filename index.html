@@ -114,7 +114,10 @@ button { -webkit-tap-highlight-color: transparent; }
 
 /* Library */
 #libScreen { overflow-y: auto; padding: calc(var(--st) + 22px) max(16px, env(safe-area-inset-left)) calc(var(--sb) + 28px); }
-.lib-head, .lib-actions, .privacy, .note-bar, .doc-list { width: 100%; max-width: 760px; margin-left: auto; margin-right: auto; }
+.lib-head, .lib-actions, .state-note, .privacy, .note-bar, .doc-list { width: 100%; max-width: 760px; margin-left: auto; margin-right: auto; }
+.state-note { margin-top: -2px; margin-bottom: 12px; font-size: 13.5px; color: var(--muted); }
+.state-note.warn { color: var(--ink); padding: 8px 12px; border-radius: 12px; background: var(--h-weakness); }
+.empty p + p { margin-top: 8px; }
 .lib-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .brand { font: 600 30px/1.12 var(--font-display); margin: 4px 0 8px; letter-spacing: -0.01em; text-wrap: balance; }
 .tagline { margin: 0; color: var(--muted); max-width: 52ch; }
@@ -342,9 +345,11 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
     <div class="lib-actions">
       <label class="btn primary" for="fileInput"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg>Add proposal PDFs</label>
       <input id="fileInput" class="vh" type="file" accept="application/pdf,.pdf" multiple>
-      <button type="button" class="btn" id="restoreBtn">Restore notes</button>
+      <button type="button" class="btn" id="saveStateBtn">Save state</button>
+      <button type="button" class="btn" id="restoreBtn">Restore state</button>
       <input id="restoreInput" class="vh" type="file" accept=".json,application/json,.pdf,application/pdf" multiple>
     </div>
+    <p id="stateNote" class="state-note" role="status" hidden></p>
     <p class="privacy"><svg class="ic sm" aria-hidden="true"><use href="#i-lock"/></svg><span>Everything happens on this device. PDFs are read inside this page, the voice runs here (your device's own voice, or the natural voice after a one-time download), and notes are stored here. Nothing is uploaded.</span></p>
     <p id="storageNote" class="note-bar" hidden>This browser is not keeping data between visits here. Export your notes before you leave.</p>
     <ul id="docList" class="doc-list" aria-label="Proposals"></ul>
@@ -1771,7 +1776,7 @@ const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = se
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const reduceMotion = () => !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
 class UserError extends Error {}
-const BUILD = "2026-11-11 23:18 UTC, 45ac2fc";
+const BUILD = "2026-11-12 00:22 UTC, 9a5f83b";
 // Diagnostic log kept on this device (localStorage) so problems on a phone can be reported.
 // It holds events, counts, sizes, and timings only: never proposal text or file names.
 const Diag = {
@@ -1806,7 +1811,13 @@ const UA = navigator.userAgent || '';
 const IS_IOS = /iP(hone|od|ad)/.test(UA) || (/Macintosh/.test(UA) && navigator.maxTouchPoints > 1);
 const IS_ANDROID = /Android/.test(UA);
 const NOTES_FILE = 'proposal-listener-notes.json';
+const STATE_FILE = 'proposal-listener-state.json';
+const STATE_V = 1;
 const SAMPLE_ID = 'sample-v1';
+// Inside claude.ai the app is an embedded page from another site. WebKit (Safari, and every browser on iPhone)
+// keeps an embedded site's storage only until the browser quits; other browsers keep it. Used only for wording.
+const IN_FRAME = (() => { try { return window.top !== window.self; } catch (e) { return true; } })();
+const ERASES_ON_QUIT = IN_FRAME && (IS_IOS || (/Safari\//.test(UA) && !/Chrome|Chromium|Edg|OPR|Firefox/.test(UA)));
 
 const TAGS = {
   strength: { label: 'Strength', plural: 'Strengths', rgb: [0.60, 0.87, 0.55] },
@@ -1818,7 +1829,8 @@ const TAG_ORDER = ['strength', 'weakness', 'question', 'note'];
 
 const DEFAULTS = {
   rate: 1.0, pitch: 1.0, voice: '', localOnly: true, allVoices: false, engine: 'device', nvoice: 'af_heart', nvWorkers: 0,
-  autoReopen: true, lastDoc: '', autoFile: true,
+  // The state file is offered automatically only where this browser erases the app's data when it quits.
+  autoReopen: true, lastDoc: '', autoFile: false, autoState: ERASES_ON_QUIT,
   skipCitations: true, skipRefs: true, skipFigs: true, readCaptions: true, skipFootnotes: false, skipUrls: true, expand: true,
   pron: '', autoScroll: true, wakeLock: true, theme: 'auto', fontSize: 18, serif: false,
   reviewer: 'Reviewer', appendSummary: true, spw: 0.36, view: 'text', pageZoom: 1,
@@ -2299,14 +2311,85 @@ const Player = {
 
 const NV_DB = 'pl-natural-voice';
 const NV_CLIP_LIMIT = (IS_IOS ? 40 : 96) * 1048576;   // bytes of generated audio kept in memory (about 48 KB per second)
-const NV_AHEAD_SECS = 600, NV_AHEAD_SENTS = 60;         // how far ahead to make speech
-const NV_REBUFFER_SECS = 20;                            // when the voice falls behind, collect this much before resuming
+const NV_AHEAD_SECS = 600, NV_AHEAD_SENTS = 120;        // how far ahead to make speech
+const NV_REBUFFER_SECS = 20;                            // when the voice falls behind, collect at least this much before resuming
+const NV_SPAN_SECS = 600;                               // ... and enough to then play about this long without stopping
 const NV_IDLE_MS = 5 * 60000;                          // free the model's memory after this long without playing
+const NV_STORE_BUDGET = 1024 * 1048576;                 // rendered speech kept on this device (oldest removed first)
+
+// Rendered speech kept on this device (IndexedDB), so speech made once plays again without waiting, also after
+// the browser restarts. Only where the browser keeps this site's storage: inside claude.ai, Safari would hold it
+// in memory and erase it at quit, so there it stays off.
+const ClipStore = {
+  db: null, meta: new Map(), bytes: 0, ok: false, opening: null,
+  enabled() { return !ERASES_ON_QUIT && Store.ok && typeof indexedDB !== 'undefined'; },
+  open() {
+    if (this.opening) return this.opening;
+    this.opening = (async () => {
+      if (!this.enabled()) return false;
+      try {
+        this.db = await new Promise((res, rej) => {
+          const r = indexedDB.open('pl-speech', 1);
+          r.onupgradeneeded = () => { const d = r.result; d.createObjectStore('clips'); d.createObjectStore('meta'); };
+          r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); r.onblocked = () => rej(new Error('blocked'));
+        });
+        const keys = await this.req('meta', 'readonly', (o) => o.getAllKeys());
+        const vals = await this.req('meta', 'readonly', (o) => o.getAll());
+        keys.forEach((k, n) => { const m = vals[n]; if (m) { this.meta.set(k, m); this.bytes += m.bytes || 0; } });
+        this.ok = true;
+      } catch (e) { this.ok = false; console.warn('speech store', e); }
+      return this.ok;
+    })();
+    return this.opening;
+  },
+  req(store, mode, fn) {
+    return new Promise((res, rej) => {
+      const tx = this.db.transaction(store, mode), r = fn(tx.objectStore(store));
+      let out; if (r) r.onsuccess = () => { out = r.result; };
+      tx.oncomplete = () => res(out); tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error || new Error('aborted'));
+    });
+  },
+  has(key) { return this.ok && this.meta.has(key); },
+  meta1(key) { return this.meta.get(key) || null; },
+  // rec: { wav (ArrayBuffer), dur, words, speed, voice }
+  async put(key, rec) {
+    if (!this.ok || this.meta.has(key)) return;
+    const m = { dur: rec.dur, speed: rec.speed, voice: rec.voice, bytes: rec.wav.byteLength, t: Date.now() };
+    this.meta.set(key, m); this.bytes += m.bytes;
+    try {
+      await new Promise((res, rej) => {
+        const tx = this.db.transaction(['clips', 'meta'], 'readwrite');
+        tx.objectStore('clips').put(rec, key); tx.objectStore('meta').put(m, key);
+        tx.oncomplete = res; tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error || new Error('aborted'));
+      });
+    } catch (e) {
+      this.meta.delete(key); this.bytes -= m.bytes;
+      if (!this.warned) { this.warned = true; Diag.log('speech store: could not keep speech (' + ((e && e.name) || e) + ')'); }
+      return;
+    }
+    if (this.bytes > NV_STORE_BUDGET) this.prune();
+  },
+  async get(key) { if (!this.has(key)) return null; try { return await this.req('clips', 'readonly', (o) => o.get(key)); } catch (e) { return null; } },
+  async prune() {
+    const old = [...this.meta.entries()].sort((a, b) => a[1].t - b[1].t);
+    const drop = [];
+    for (const [k, m] of old) { if (this.bytes <= NV_STORE_BUDGET * 0.9) break; drop.push(k); this.meta.delete(k); this.bytes -= m.bytes; }
+    if (!drop.length) return;
+    try { await new Promise((res, rej) => { const tx = this.db.transaction(['clips', 'meta'], 'readwrite'); for (const k of drop) { tx.objectStore('clips').delete(k); tx.objectStore('meta').delete(k); } tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
+    catch (e) { /* removed from the index anyway */ }
+  },
+  async clear() {
+    this.meta.clear(); this.bytes = 0;
+    if (!this.ok) return;
+    try { await new Promise((res, rej) => { const tx = this.db.transaction(['clips', 'meta'], 'readwrite'); tx.objectStore('clips').clear(); tx.objectStore('meta').clear(); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
+    catch (e) { /* nothing stored */ }
+  },
+};
 
 const NV = {
   man: undefined, state: 'off', error: '', prog: null, cached: null,
-  slots: [], queue: [], jobs: new Map(), seq: 0, clips: new Map(), bytes: 0,
-  stats: { gen: 0, audio: 0 }, url: null, readyP: null, single: false,
+  slots: [], queue: [], jobs: new Map(), seq: 0, clips: new Map(), bytes: 0, loads: new Map(), prepKeys: null,
+  stats: { gen: 0, audio: 0 }, url: null, readyP: null, single: false, wasReady: false,
 
   manifest() {
     if (this.man === undefined) { try { this.man = JSON.parse($id('src-ttsman').textContent); } catch (e) { this.man = null; } }
@@ -2333,6 +2416,7 @@ const NV = {
     });
   },
   async checkCached() {
+    ClipStore.open();
     if (!this.supported()) return (this.cached = false);
     try {
       const db = await this.openDb();
@@ -2349,6 +2433,7 @@ const NV = {
       await new Promise((res, rej) => { const tx = db.transaction('files', 'readwrite'); tx.objectStore('files').clear(); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
       db.close();
     } catch (e) { /* nothing stored */ }
+    await ClipStore.clear();                     // speech made with it goes too
     this.cached = false;
     this.changed();
   },
@@ -2379,7 +2464,7 @@ const NV = {
     Diag.log(`voice: loading (${this.cached ? 'from this device' : 'download'})`);
     const slot = this.spawn();
     this.readyP = slot.ready.then(() => {
-      this.state = 'ready'; this.cached = true; this.prog = null; this.changed(); this.pump();
+      this.state = 'ready'; this.cached = true; this.prog = null; this.wasReady = true; this.changed(); this.pump();
       Diag.log(`voice: ready in ${Math.round(performance.now() - t0)} ms`);
       NPlay.warm();
       this.idleSoon();
@@ -2402,6 +2487,7 @@ const NV = {
     NVGuard.off();
     if (this.state === 'off' && !this.slots.length) return;
     Diag.log('voice: unloaded (' + why + ')');
+    if (NPlay.prep) { Diag.log(`voice: stopped preparing ahead (${why}; ${NPlay.prep.done} of ${NPlay.prep.total} done)`); NPlay.prep = null; this.prepKeys = null; }
     for (const s of this.slots) { clearTimeout(s.timer); try { s.w.terminate(); } catch (e) { /* ignore */ } }
     this.slots = []; this.readyP = null; this.prog = null; this.growing = false;
     const all = [...this.queue, ...this.jobs.values()];
@@ -2413,7 +2499,7 @@ const NV = {
   },
   idleSoon() {
     clearTimeout(this.idleT);
-    this.idleT = setTimeout(() => { if (Player.state !== 'playing' && this.state === 'ready') this.unload('idle'); else this.idleSoon(); }, NV_IDLE_MS);
+    this.idleT = setTimeout(() => { if (Player.state !== 'playing' && this.state === 'ready' && !NPlay.prep) this.unload('idle'); else this.idleSoon(); }, NV_IDLE_MS);
   },
   // A sentence took far too long (a stuck worker): restart the workers and keep the queue; give up on a
   // sentence that gets stuck twice.
@@ -2473,11 +2559,32 @@ const NV = {
     }
   },
 
-  // A clip for this text and voice: cached, already queued, or newly queued with priority `pri` (0 = next).
+  // A clip for this text and voice: in memory, kept on this device, already queued, or newly queued with
+  // priority `pri` (0 = next).
   request(text, voice, pri) {
     const key = this.key(text, voice);
     const c = this.clips.get(key);
     if (c) { c.t = Date.now(); return Promise.resolve(c); }
+    if (ClipStore.has(key)) return this.load(text, voice).then((x) => x || this.synth(key, text, voice, pri));
+    return this.synth(key, text, voice, pri);
+  },
+  // A clip kept on this device, put back in memory (null if it is not kept or cannot be read).
+  load(text, voice) {
+    const key = this.key(text, voice);
+    const c = this.clips.get(key);
+    if (c) return Promise.resolve(c);
+    if (!ClipStore.has(key)) return Promise.resolve(null);
+    if (this.loads.has(key)) return this.loads.get(key);
+    const p = ClipStore.get(key).then((rec) => {
+      this.loads.delete(key);
+      if (!rec || !rec.wav) return null;
+      return this.clips.get(key) || this.addClip({ key, voice, speed: rec.speed }, { wav: rec.wav, dur: rec.dur, words: rec.words }, true);
+    }, () => { this.loads.delete(key); return null; });
+    this.loads.set(key, p);
+    return p;
+  },
+  stored(text, voice) { return ClipStore.has(this.key(text, voice)); },
+  synth(key, text, voice, pri) {
     let j = this.queue.find((q) => q.key === key);
     if (!j) for (const q of this.jobs.values()) if (q.key === key) j = q;
     if (j) { if (pri < j.pri) { j.pri = pri; this.queue.sort((a, b) => a.pri - b.pri); } return j.p; }
@@ -2490,7 +2597,9 @@ const NV = {
   peek(text, voice) { return this.clips.get(this.key(text, voice)) || null; },
   // Forget queued (not started) requests that are no longer wanted.
   retain(keys) {
+    this.window = new Set(keys);                        // the playback window: kept in memory when memory is trimmed
     const keep = new Set(keys);
+    if (this.prepKeys) for (const k of this.prepKeys) keep.add(k);   // speech being prepared ahead stays queued
     const out = [];
     this.queue = this.queue.filter((j) => (keep.has(j.key) ? true : (out.push(j), false)));
     for (const j of out) j.reject(Object.assign(new Error('not needed'), { dropped: true }));
@@ -2509,8 +2618,9 @@ const NV = {
     }
     this.maybeGrow();
   },
-  addClip(j, m) {
+  addClip(j, m, fromStore) {
     const c = { key: j.key, voice: j.voice.id, url: URL.createObjectURL(new Blob([m.wav], { type: 'audio/wav' })), dur: m.dur, words: m.words || [], speed: j.speed, bytes: m.wav.byteLength, t: Date.now() };
+    if (!fromStore) { this.lastClipAt = Date.now(); if (ClipStore.ok) ClipStore.put(j.key, { wav: m.wav, dur: m.dur, words: m.words || [], speed: j.speed, voice: j.voice.id }); }
     const old = this.clips.get(c.key);
     if (old) { this.bytes -= old.bytes; if (old !== NPlay.clip) URL.revokeObjectURL(old.url); }
     this.clips.set(c.key, c); this.bytes += c.bytes;
@@ -2521,7 +2631,7 @@ const NV = {
     if (this.bytes > NV_CLIP_LIMIT) {
       for (const x of [...this.clips.values()].sort((a, b) => a.t - b.t)) {
         if (this.bytes <= NV_CLIP_LIMIT * 0.8) break;
-        if (x === NPlay.clip || x === c) continue;
+        if (x === NPlay.clip || x === c || (this.window && this.window.has(x.key) && !ClipStore.has(x.key))) continue;
         this.clips.delete(x.key); this.bytes -= x.bytes; URL.revokeObjectURL(x.url);
       }
     }
@@ -2533,6 +2643,8 @@ const NV = {
   },
   // Seconds of generation per second of audio at normal speed, measured on this device (null until known).
   ratio() { return this.stats.audio >= 8 ? this.stats.gen / this.stats.audio : null; },
+  // Seconds of speech made per second of listening, with the workers running now (null until known).
+  pace() { const r = this.ratio(); return r == null ? null : Math.max(1, this.slots.filter((s) => s.ok).length) / (r * App.S.rate); },
   // A second worker (about 400 MB more) starts only when one cannot keep up. Off if the user turned it off,
   // or if the page once stopped unexpectedly while two were running.
   maxWorkers() {
@@ -2551,7 +2663,7 @@ const NV = {
     if (this.state !== 'ready' || this.growing || this.slots.length >= this.maxWorkers()) return;
     const r = this.ratio();
     if (r == null || this.queue.length < 2) return;
-    if (r * App.S.rate < 0.85 * this.slots.length) return;
+    if (r * App.S.rate < 0.85 * this.slots.length && !(NPlay.prep && this.queue.length >= 4)) return;   // preparing ahead: use both
     this.growing = true;
     Diag.log(`voice: starting a second worker (${r.toFixed(2)} s of work per s of speech at ${App.S.rate}x)`);
     NVGuard.on();
@@ -2577,13 +2689,16 @@ const NVGuard = {
   },
 };
 
-const NV_SILENT = (() => {
-  const n = 2400, b = new ArrayBuffer(44 + n * 2), v = new DataView(b);
+// A silent 16-bit mono WAV of n samples at `rate` Hz.
+function silentWav(n, rate) {
+  const b = new ArrayBuffer(44 + n * 2), v = new DataView(b);
   const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
   w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
-  v.setUint32(24, 24000, true); v.setUint32(28, 48000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true);
   return b;
-})();
+}
+const NV_SILENT = silentWav(2400, 24000);            // 0.1 s: plays during the first tap so later clips may start
+const NV_KEEPALIVE = silentWav(16000, 8000);        // 2 s, looped while waiting for speech
 
 // ── Playback of natural-voice clips ────────────────────────────────────────
 const NPlay = {
@@ -2617,22 +2732,43 @@ const NPlay = {
     const p = a.play();
     if (p && p.catch) p.catch(() => { this.unlocked = false; });
   },
+  // While waiting for speech in the middle of playback, keep a silent track playing: the iPhone then keeps the
+  // page running (so speech keeps being made with the screen locked) and lets the next clip start without a tap.
+  keepAlive(on) {
+    const a = this.el;
+    if (!on) { if (this.alive) { this.alive = false; if (a) a.loop = false; } return; }
+    if (!a || !this.unlocked || this.alive) return;
+    if (!this.aliveUrl) this.aliveUrl = URL.createObjectURL(new Blob([NV_KEEPALIVE], { type: 'audio/wav' }));
+    this.alive = true; this.quiet = true;
+    a.loop = true; a.src = this.aliveUrl; a.playbackRate = 1;
+    const p = a.play(); if (p && p.catch) p.catch(() => {});
+  },
   setWaiting(on) {
     if (this.waiting === on) return;
     this.waiting = on;
     document.body.classList.toggle('nv-wait', on);
     if (typeof syncPlayUI === 'function') syncPlayUI();
     clearInterval(this.waitT);
-    if (!on) return;
+    if (!on) { this.keepAlive(false); return; }
+    if (this.active && Player.state === 'playing') this.keepAlive(true);
     const since = Date.now();
     this.waitT = setInterval(() => {
       if (!this.waiting || Player.state !== 'playing') { clearInterval(this.waitT); return; }
       const secs = (Date.now() - since) / 1000;
       if (NV.state === 'loading') return;              // still downloading or loading: progress is shown
-      if (secs > 6 && (!this.noticeAt || Date.now() - this.noticeAt > 60000)) { this.noticeAt = Date.now(); toast('The natural voice is catching up…'); }
-      if (secs > 240) {
+      if (this.rebuf) {                                  // collecting speech: say how long, and how to avoid it
+        if (!this.noticeAt || Date.now() - this.noticeAt > 20000) {
+          this.noticeAt = Date.now();
+          const need = Math.max(0, this.rebuf.target - this.aheadSecs(this.rebuf.i));
+          const left = need / Math.max(0.05, NV.pace() || this.rebuf.p || 0.5);
+          toast(`Getting ${fmtDur(this.rebuf.target)} of speech ready, so it can then play without stopping: about ${fmtDur(left)} left.${this.tipShown ? '' : ' To avoid waits, use Voice › Prepare ahead.'}`);
+          this.tipShown = true;
+        }
+      } else if (secs > 6 && (!this.noticeAt || Date.now() - this.noticeAt > 60000)) { this.noticeAt = Date.now(); toast('The natural voice is catching up…'); }
+      // Stopped responding: no new speech for 4 minutes while waiting (a long wait that is making speech is fine).
+      if (secs > 240 && Date.now() - Math.max(since, NV.lastClipAt || 0) > 240000) {
         clearInterval(this.waitT);
-        Diag.log('voice: waited 4 minutes for a sentence; pausing');
+        Diag.log('voice: no new speech for 4 minutes while waiting; pausing');
         Player.pause();
         toast('The natural voice stopped responding. Tap play to try again, or switch to Device voices.');
       }
@@ -2673,6 +2809,10 @@ const NPlay = {
     const sp = spoken(i), voice = NV.voice();
     if (!sp || !voice) { this.next(i, gen); return; }
     let clip = NV.peek(sp.text, voice);
+    if (!clip && NV.stored(sp.text, voice)) {          // made earlier and kept on this device: no model needed
+      clip = await NV.load(sp.text, voice);
+      if (gen !== Player.gen) return;
+    }
     if (!clip) {
       this.setWaiting(true);
       try {
@@ -2694,9 +2834,11 @@ const NPlay = {
       if (gen !== Player.gen) return;
     }
     this.setWaiting(false);
+    if (this.retried && Date.now() - this.retriedAt > 60000) this.retried = false;   // working again after a restart
     this.idx = i; this.clip = clip; this.base = fromChar; this.lastW = -1;
     const a = this.audio();
     this.quiet = true;
+    a.loop = false;
     a.src = clip.url;
     a.playbackRate = this.rateFor(clip);
     const t0 = fromChar > 0 ? this.timeAt(clip, fromChar) : 0;
@@ -2719,20 +2861,35 @@ const NPlay = {
     const voice = NV.voice(); let secs = 0;
     for (let k = i; k >= 0; k = nextPlayable(k + 1, 1)) {
       const sp = spoken(k); if (!sp) continue;
-      const c = NV.peek(sp.text, voice); if (!c) break;
+      const c = NV.peek(sp.text, voice) || ClipStore.meta1(NV.key(sp.text, voice));   // in memory or kept on this device
+      if (!c) break;
       secs += c.dur / this.rateFor(c);
-      if (secs > 600) break;
+      if (secs > 900) break;
     }
     return secs;
   },
+  // Speech to collect before resuming when the voice is behind: enough to then play about ten minutes (or to the
+  // end) without stopping again, given how fast this device makes speech. Fewer, longer waits.
+  bufferTarget(i) {
+    const p = NV.pace();
+    if (p == null || p >= 0.98) return NV_REBUFFER_SECS;
+    const rest = suffixWords()[Math.max(0, i)] * App.S.spw / App.S.rate;
+    return clamp(Math.ceil((1 - p) * Math.min(rest, NV_SPAN_SECS)), NV_REBUFFER_SECS, 480);
+  },
   rebuffer(i, gen) {
-    const t0 = Date.now();
-    Diag.log('voice: behind; collecting speech before resuming');
+    const t0 = Date.now(), target = this.bufferTarget(i), p = NV.pace() || 0.5;
+    const limit = Math.min(30 * 60000, Math.max(90000, 2500 * target / Math.max(0.05, p)));
+    this.rebuf = { i, target, p, t0 };
+    Diag.log(`voice: behind; collecting ${Math.round(target)} s of speech before resuming`);
     return new Promise((res) => {
       const tick = () => {
-        if (gen !== Player.gen || NV.state === 'error') return res();
+        if (gen !== Player.gen || NV.state === 'error') { this.rebuf = null; return res(); }
         const idle = !NV.queue.length && !NV.jobs.size;
-        if (this.aheadSecs(i) >= NV_REBUFFER_SECS || idle || Date.now() - t0 > 90000) { Diag.log(`voice: resuming after ${Math.round((Date.now() - t0) / 1000)} s with ${Math.round(this.aheadSecs(i))} s ready`); return res(); }
+        if (this.aheadSecs(i) >= target || idle || Date.now() - t0 > limit) {
+          this.rebuf = null;
+          Diag.log(`voice: resuming after ${Math.round((Date.now() - t0) / 1000)} s with ${Math.round(this.aheadSecs(i))} s ready`);
+          return res();
+        }
         setTimeout(tick, 400);
       };
       tick();
@@ -2768,24 +2925,28 @@ const NPlay = {
   },
   // Queue the sentences after `i` until about ten minutes of speech (or 60 sentences) are ready or requested.
   prefetch(i) {
-    if (NV.state !== 'ready' && NV.state !== 'loading') return;
     const voice = NV.voice(); if (!voice) return;
+    const model = NV.state === 'ready' || NV.state === 'loading';
     const want = [];
-    let k = i, secs = 0, n = 0;
+    let k = i, secs = 0, n = 0, missing = false;
     if (i >= 0 && i === this.idx && this.clip) want.push(this.clip.key);
     while (n < NV_AHEAD_SENTS && secs < NV_AHEAD_SECS) {
       k = nextPlayable(k + 1, 1);
       if (k < 0 || Sleep.stopsBefore(k)) break;
       const sp = spoken(k); if (!sp) continue;
-      const c = NV.peek(sp.text, voice);
-      want.push(NV.key(sp.text, voice));
-      secs += c ? c.dur / this.rateFor(c) : countWords(sp.text) * App.S.spw / App.S.rate;
-      if (!c) NV.request(sp.text, voice, n + 1).catch(() => {});
+      const key = NV.key(sp.text, voice);
+      const c = NV.peek(sp.text, voice), m = c ? null : ClipStore.meta1(key);
+      want.push(key);
+      if (c) secs += c.dur / this.rateFor(c);
+      else if (m) { secs += m.dur / this.rateFor(m); if (n < 2) NV.load(sp.text, voice).catch(() => {}); }   // kept on this device
+      else { secs += countWords(sp.text) * App.S.spw / App.S.rate; missing = true; if (model) NV.request(sp.text, voice, n + 1).catch(() => {}); }
       n++;
     }
     const cur = i >= 0 ? spoken(i) : null;
     if (cur) want.push(NV.key(cur.text, voice));
-    NV.retain(want);
+    if (model) NV.retain(want);
+    // Playing speech kept on this device with the voice unloaded: load it in time for the first sentence it lacks.
+    else if (missing && this.active && Player.state === 'playing' && NV.state === 'off') NV.ensure().then(() => this.prefetch(this.idx), () => {});
   },
   onEnded() {
     if (!this.active || this.quiet || Player.state !== 'playing' || this.waiting) return;
@@ -2815,6 +2976,7 @@ const NPlay = {
   onPauseEvent() {
     const a = this.el;
     if (!this.active || this.quiet || this.waiting || !a || a.ended || Player.state !== 'playing') return;
+    if (!a.paused) return;                      // a source change (silent track to the next clip), not a pause
     if (this.pausing) return;
     Diag.log('audio: paused from outside the app' + (document.hidden ? ' (page hidden)' : ''));
     Player.pause();                             // paused from outside (lock screen, a call, another app)
@@ -2851,6 +3013,25 @@ const NPlay = {
     P.play(App.cur, P.lastChar || 0);
   },
   engineFailed(e) {
+    const playing = this.active && Player.state === 'playing';
+    if (NV.wasReady) {
+      // It had been working (a crash, often memory): restart it once and continue where it stopped. If that fails
+      // too, pause and say so, rather than switch to the device voice, which may make no sound with the screen locked.
+      NV.state = 'off'; NV.error = '';             // so play tries the natural voice again
+      const i = App.cur, ch = Player.lastChar || 0;
+      if (playing && !this.retried) {
+        this.retried = true; this.retriedAt = Date.now();
+        Diag.log('voice: restarting after a failure during playback');
+        this.halt(); Player.state = 'idle';
+        Player.play(i, ch);
+        return;
+      }
+      Diag.log('voice: stopped after a failure');
+      if (playing) { this.halt(); Player.state = 'paused'; Player.resumeChar = ch; syncPlayUI(); Wake.off(); Media.update(); savePos(); }
+      toast('The natural voice stopped (' + ((e && e.message) || 'unknown error') + '). Tap play to try again, or choose Device voices under Voice.');
+      NV.changed();
+      return;
+    }
     toast('The natural voice could not start: ' + ((e && e.message) || 'unknown error') + ' Using the device voice.');
     if (this.active && Player.state === 'playing') {
       const i = App.cur, ch = Player.lastChar || 0;
@@ -2858,6 +3039,59 @@ const NPlay = {
       Player.state = 'idle';
       Player.play(i, ch);
     } else this.halt();
+  },
+  // Prepare ahead: make the speech for the rest of this proposal (from the current sentence) and keep it on this
+  // device, so it later plays without waiting, also with the screen locked.
+  prep: null,
+  async prepare() {
+    const voice = NV.voice();
+    if (!voice || !App.model || !App.doc || this.prep) return;
+    await ClipStore.open();
+    if (!ClipStore.ok) { toast('This browser does not keep speech on this device here, so it cannot be prepared ahead.'); return; }
+    const seen = new Set(), todo = [];
+    let all = 0;
+    for (let k = nextPlayable(App.cur, 1); k >= 0; k = nextPlayable(k + 1, 1)) {
+      const sp = spoken(k); if (!sp) continue;
+      const key = NV.key(sp.text, voice);
+      if (seen.has(key)) continue;
+      seen.add(key); all++;
+      if (!NV.peek(sp.text, voice) && !ClipStore.has(key)) todo.push(sp.text);
+    }
+    if (!todo.length) { toast('The rest of this proposal is ready to play without waiting.'); NV.changed(); return; }
+    const pr = this.prep = { doc: App.doc.id, voice: voice.id, keys: new Set(todo.map((t) => NV.key(t, voice))), total: todo.length, done: 0, all,
+      chars: todo.reduce((s, t) => s + t.length, 0), charsDone: 0, t0: Date.now() };
+    NV.prepKeys = pr.keys;
+    Diag.log(`voice: preparing ${pr.total} sentences ahead`);
+    Wake.on(); NV.changed();
+    try { await NV.ensure(); } catch (e) { this.stopPrepare('the voice could not start'); return; }
+    if (this.prep !== pr) return;
+    todo.forEach((t, n) => NV.request(t, voice, 1000 + n).then(() => this.prepStep(pr, t, false), () => this.prepStep(pr, t, true)));
+  },
+  prepStep(pr, text, failed) {
+    if (this.prep !== pr) return;
+    pr.done++; if (!failed) pr.charsDone += text.length; else pr.failed = (pr.failed || 0) + 1;
+    if (pr.done >= pr.total) {
+      this.prep = null; NV.prepKeys = null;
+      Diag.log(`voice: prepared ahead (${pr.total} sentences in ${Math.round((Date.now() - pr.t0) / 1000)} s${pr.failed ? `, ${pr.failed} failed` : ''})`);
+      if (Player.state !== 'playing') Wake.off();
+      toast(pr.failed ? `Prepared, except ${plural(pr.failed, 'sentence', 'sentences')} that could not be read.` : 'The rest of this proposal is ready to play without waiting.');
+      NV.idleSoon();
+    }
+    NV.changed();
+  },
+  stopPrepare(why) {
+    const pr = this.prep; if (!pr) return;
+    this.prep = null; NV.prepKeys = null;
+    Diag.log(`voice: stopped preparing ahead (${why}; ${pr.done} of ${pr.total} done)`);
+    if (this.active && Player.state === 'playing') this.prefetch(this.idx); else NV.retain([]);   // drop the queued rest
+    if (Player.state !== 'playing') Wake.off();
+    NV.idleSoon(); NV.changed();
+  },
+  // Progress of preparing ahead: done and total sentences, and seconds left (null until the speed is known).
+  prepInfo() {
+    const pr = this.prep; if (!pr) return null;
+    const r = NV.ratio(), w = Math.max(1, NV.slots.filter((s) => s.ok).length);
+    return { done: pr.done, total: pr.total, pct: Math.floor(100 * pr.done / pr.total), left: r == null ? null : ((pr.chars - pr.charsDone) / 14) * r / w };
   },
   // While paused, prepare the sentence under the cursor (and the next) so play starts at once.
   warmSoon() { clearTimeout(this.warmT); this.warmT = setTimeout(() => this.warm(), 1200); },
@@ -2905,7 +3139,7 @@ const fmtRate = (r) => (Math.round(r * 100) / 100).toFixed(r * 100 % 10 === 0 ? 
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
 function bindEls() {
-  for (const id of ['libScreen', 'readScreen', 'docList', 'fileInput', 'restoreInput', 'restoreBtn', 'libSettings', 'storageNote',
+  for (const id of ['libScreen', 'readScreen', 'docList', 'fileInput', 'restoreInput', 'restoreBtn', 'saveStateBtn', 'stateNote', 'libSettings', 'storageNote',
     'backBtn', 'docTitle', 'docSub', 'viewBtn', 'tocBtn', 'notesBtn', 'notesCount', 'moreBtn', 'scroller', 'textView', 'pageView',
     'pageZoom', 'zoomIn', 'zoomOut', 'zoomLbl', 'followChip', 'selBar', 'player', 'sleepBtn', 'sleepLbl', 'progress', 'timeLeft',
     'listenBtn', 'speedBtn', 'prevBtn', 'playBtn', 'nextBtn', 'markBtn', 'sheet', 'sheetTitle', 'sheetBody', 'listen', 'lsClose',
@@ -3008,9 +3242,11 @@ async function renderLibrary() {
         <span class="doc-title"><span class="chip">Sample</span> Try a short fictional proposal</span>
         <span class="doc-meta"><span>Hear the voices, try highlighting, and export a notes PDF before you load a real proposal.</span></span>
       </button></li>`;
-  const empty = docs.filter((d) => !d.sample).length ? '' : `<li class="empty"><p><strong>No proposals yet.</strong> Copy PDFs to this device, then use <em>Add proposal PDFs</em>. On iPhone the picker opens the Files app.</p></li>`;
+  const empty = docs.filter((d) => !d.sample).length ? '' : `<li class="empty"><p><strong>No proposals yet.</strong> Copy PDFs to this device, then use <em>Add proposal PDFs</em>. On iPhone the picker opens the Files app.</p>
+    <p>${ERASES_ON_QUIT ? 'This browser erases the app’s data when it quits. ' : ''}If you saved a state, tap <em>Restore state</em> and choose the newest <em>Proposal Listener State</em> file${IS_IOS ? ' (in Files, usually under Downloads)' : ''}.</p></li>`;
   els.docList.innerHTML = empty + rows.join('') + sample;
   els.storageNote.hidden = Store.ok;
+  updateStateNote();
 }
 
 async function docMenu(id) {
@@ -3033,18 +3269,28 @@ async function docMenu(id) {
   };
 }
 
-async function readNotesAttachment(pdf) {
+// A PDF's attached files: [{key, a, name}]. pdf.js ≥ 6 returns a Map without content (fetched separately);
+// older versions return an object with content.
+async function pdfAttachments(pdf) {
   try {
     const att = await pdf.getAttachments();
-    if (!att) return null;
-    // pdf.js ≥ 6 returns a Map without content (fetched separately); older versions return an object with content.
+    if (!att) return [];
     const entries = att instanceof Map ? [...att.entries()] : Object.entries(att);
-    for (const [key, a] of entries) {
-      const name = (a && (a.filename || a.rawFilename)) || key;
-      if (!name || !String(name).endsWith(NOTES_FILE)) continue;
-      let content = a && a.content;
-      if (!content && typeof pdf.getAttachmentContent === 'function') content = await pdf.getAttachmentContent(key);
-      if (content && content.content) content = content.content;
+    return entries.map(([key, a]) => ({ key, a, name: String((a && (a.filename || a.rawFilename)) || key || '') }));
+  } catch (e) { console.warn('could not list attachments', e); return []; }
+}
+async function pdfAttachmentBytes(pdf, e) {
+  if (!e) return null;
+  let c = e.a && e.a.content;
+  if (!c && typeof pdf.getAttachmentContent === 'function') c = await pdf.getAttachmentContent(e.key);
+  if (c && c.content) c = c.content;
+  return c ? (c instanceof Uint8Array ? c : new Uint8Array(c)) : null;
+}
+async function readNotesAttachment(pdf, list) {
+  try {
+    for (const e of list || await pdfAttachments(pdf)) {
+      if (!e.name.endsWith(NOTES_FILE)) continue;
+      const content = await pdfAttachmentBytes(pdf, e);
       if (!content) continue;
       const j = JSON.parse(new TextDecoder().decode(content));
       if (j && j.app === 'proposal-listener') return j;
@@ -3126,9 +3372,15 @@ async function importBytes(bytes, name, opt = {}) {
   NV.unload('adding a PDF');
   busy(`Reading ${name}…`);
   return withPdf(bytes, async (pdf) => {
+    const list = await withTimeout(pdfAttachments(pdf), 20000, 'The PDF engine did not respond.');
+    if (!opt.id && list.some((e) => e.name.endsWith(STATE_FILE))) {      // a saved state, not a proposal
+      await detachDoc('restoring a saved state');
+      busy('Restoring your saved state…');
+      return { state: await restoreStateFromPdf(pdf, list) };
+    }
     const fp = (pdf.fingerprints && pdf.fingerprints[0]) || (name + ':' + bytes.length);
     const id = opt.id || ('fp-' + fp);
-    const att = await withTimeout(readNotesAttachment(pdf), 20000, 'The PDF engine did not respond.');
+    const att = await withTimeout(readNotesAttachment(pdf, list), 20000, 'The PDF engine did not respond.');
     const maxPages = att && att.origPages > 0 && att.origPages < pdf.numPages ? att.origPages : 0;
     const raw = await parseGuarded(pdf, { maxPages, onProgress: (p, n) => busy(`Reading page ${p} of ${n}…`) });
     if (!raw.sents.length || raw.chars < 40) throw new UserError('This PDF has no selectable text (it may be a scan), so it cannot be read aloud.');
@@ -3166,13 +3418,17 @@ async function importFiles(files) {
   const pdfs = files.filter((f) => /\.pdf$/i.test(f.name) || f.type === 'application/pdf');
   const jsons = files.filter((f) => /\.json$/i.test(f.name) || f.type === 'application/json');
   if (!pdfs.length && !jsons.length) { if (files.length) toast('Choose PDF files (or a notes backup).'); return; }
-  let last = null, ok = 0, restored = 0;
+  let last = null, ok = 0, restored = 0, state = null;
   for (const f of jsons) { try { restored += await restoreBackup(f); } catch (e) { await infoSheet('Could not restore ' + f.name, errMsg(e)); } }
   for (const f of pdfs) {
-    try { const r = await importBytes(new Uint8Array(await f.arrayBuffer()), f.name); last = r.id; ok++; restored += r.restored; }
-    catch (e) { if (!(e instanceof UserError)) console.error(e); busy(false); await infoSheet('Could not add ' + f.name, errMsg(e)); }
+    try {
+      const r = await importBytes(new Uint8Array(await f.arrayBuffer()), f.name);
+      if (r.state) { state = r.state; continue; }
+      last = r.id; ok++; restored += r.restored;
+    } catch (e) { if (!(e instanceof UserError)) console.error(e); busy(false); await infoSheet('Could not add ' + f.name, errMsg(e)); }
   }
   busy(false);
+  if (state) { await afterStateRestore(state, ok); return; }
   if (restored) toast(`Restored ${plural(restored, 'note', 'notes')}`);
   if (ok === 1 && pdfs.length === 1) await openDoc(last); else await renderLibrary();
 }
@@ -3237,16 +3493,23 @@ async function closeDoc() {
     App.S.lastDoc = '';
     await flushSettings();                        // stored before anything else, so a reload from here shows the library
     closeListen(); hideSelBar(); hideFollowChip();
-    // Store your place and notes first: the notes file below waits for a tap to confirm.
+    // Store your place and notes first: the files below wait for a tap to confirm.
     try { await savePos(); await saveNotes(); } catch (e) { console.warn('saving on leave', e); Diag.log('could not save on leaving: ' + ((e && e.message) || e)); }
     await autoSaveNotesFile('left the proposal');
-    if (App.handle) { const h = App.handle; App.handle = null; h.close(); }
-    PageView.reset();
-    App.doc = null; App.model = null; App.notes = null; App.spans = []; App.hlTop = [];
-    els.textView.innerHTML = '';
+    await autoSaveState('left the proposal');
+    await detachDoc();
     showScreen('lib');
     renderLibrary();
   } finally { closingDoc = false; }
+}
+// Close the open proposal without leaving the reader screen's state behind (place and notes are stored first).
+async function detachDoc(why) {
+  if (!App.doc) return;
+  if (why) { Player.stop(); NV.unload(why); closeListen(); hideSelBar(); hideFollowChip(); try { await savePos(); await saveNotes(); } catch (e) { console.warn('saving before closing', e); } }
+  if (App.handle) { const h = App.handle; App.handle = null; h.close(); }
+  PageView.reset();
+  App.doc = null; App.model = null; App.notes = null; App.spans = []; App.hlTop = [];
+  els.textView.innerHTML = '';
 }
 
 function renderText() {
@@ -3328,7 +3591,8 @@ function updateProgress() {
   const left = Timing.secsLeft();
   els.timeLeft.textContent = fmtDur(left);
   const s = M.sents[App.cur];
-  els.docSub.textContent = `Page ${s.p} of ${M.nPages} · ${fmtDur(left)} left · ${heardPct()}% heard`;
+  const pi = NPlay.prep && App.doc && NPlay.prep.doc === App.doc.id ? NPlay.prepInfo() : null;
+  els.docSub.textContent = `Page ${s.p} of ${M.nPages} · ${fmtDur(left)} left · ${pi ? `preparing ${pi.pct}%` : `${heardPct()}% heard`}`;
 }
 
 function syncPlayUI() {
@@ -3534,6 +3798,26 @@ function nvStatusHtml() {
     <p class="hint">${NV.cached ? 'Already downloaded to this device.' : `One-time download of about ${mbOf(NV.downloadSize())} MB; use Wi-Fi. It needs about half a gigabyte of memory while it runs.`}</p>
     <div class="row"><button type="button" class="btn primary" data-act="nv-load">${NV.cached ? 'Turn on the natural voice' : 'Download and turn on'}</button></div></div>`;
 }
+// Prepare ahead: make the rest of the proposal's speech now and keep it on this device.
+const prepText = (pi) => `Preparing ahead: ${pi.pct}% (${pi.done} of ${pi.total} sentences)${pi.left != null ? ` · about ${fmtDur(pi.left)} left` : ''}`;
+function prepHtml() {
+  if (!NV.supported() || App.S.engine !== 'natural' || !App.model) return '';
+  if (!ClipStore.enabled()) return `<p class="hint">Preparing ahead needs the app at its own web address: inside claude.ai, this browser erases kept speech when it quits.</p>`;
+  const pi = NPlay.prepInfo();
+  if (pi) return `<div class="nv-card"><div class="nv-row"><span class="spin sm" aria-hidden="true"></span><span id="nvPrepTxt">${prepText(pi)}</span></div>
+    <progress id="nvPrepBar" max="100" value="${pi.pct}" aria-label="Preparing ahead"></progress>
+    <p class="hint">Keep this proposal open with the screen on (the app keeps it on). You can listen meanwhile.</p>
+    <div class="row"><button type="button" class="btn" data-act="nv-prep-stop">Stop preparing</button></div></div>`;
+  const voice = NV.voice();
+  let chars = 0, n = 0;
+  if (voice) for (let k = nextPlayable(App.cur, 1); k >= 0; k = nextPlayable(k + 1, 1)) { const sp = spoken(k); if (sp && !NV.peek(sp.text, voice) && !NV.stored(sp.text, voice)) { n++; chars += sp.text.length; } }
+  if (!n) return `<p class="hint">The rest of this proposal is prepared: it plays without waiting.</p>`;
+  const r = NV.ratio();
+  const est = r != null ? `About ${fmtDur((chars / 14) * r / NV.maxWorkers())} on this device, with the screen on.` : 'The first time on a device takes a while; the time left is shown once the speed is measured.';
+  return `<div class="nv-card"><p><b>Prepare ahead</b> makes the speech for the rest of this proposal now and keeps it on this device, so it plays without waiting, also with the screen locked.</p>
+    <p class="hint">${est} Prepared speech stays for next time. It is redone if you change the voice.</p>
+    <div class="row"><button type="button" class="btn" data-act="nv-prep">Prepare the rest of this proposal</button></div></div>`;
+}
 function openVoiceSheet(keepScroll) {
   const S = App.S;
   const keep = keepScroll === true;
@@ -3542,10 +3826,10 @@ function openVoiceSheet(keepScroll) {
   const vs = Voices.filtered(), cur = Voices.current(), curId = cur ? Voices.id(cur) : '';
   const speeds = [0.8, 1, 1.25, 1.5, 1.75, 2, 2.5, 3];
   const scroll = keep && !els.sheet.hidden ? els.sheetBody.scrollTop : 0;
-  nvSheetState = NV.state + '|' + (NV.prog ? NV.prog.phase : '') + '|' + NV.cached + '|' + S.engine + '|' + (NV.blocked || '');
+  nvSheetState = NV.state + '|' + (NV.prog ? NV.prog.phase : '') + '|' + NV.cached + '|' + S.engine + '|' + (NV.blocked || '') + '|' + (NPlay.prep ? 'prep' : '');
   const nvVoice = NV.voice();
   if (tab === 'natural' && NV.state === 'off' && NV.supported()) NV.probe();
-  const naturalPanel = `${nvStatusHtml()}
+  const naturalPanel = `${nvStatusHtml()}${prepHtml()}
       ${NV.supported() ? `<ul class="list" role="radiogroup" aria-label="Natural voices">${NV.voices().map((v) => `<li class="vrow" role="radio" tabindex="0" aria-checked="${nvVoice && v.id === nvVoice.id}" data-nvid="${esc(v.id)}"><span class="vname">${esc(v.name)}</span><span class="vmeta">${v.lang === 'b' ? 'British' : 'American'} · ${v.gender === 'F' ? 'female' : 'male'}${/^A/.test(v.grade) ? ' · most natural' : ''}</span></li>`).join('')}</ul>
       <div class="row">${NV.state === 'ready' ? '<button type="button" class="btn" data-act="test">Test voice</button>' : ''}${NV.cached && NV.state !== 'loading' ? '<button type="button" class="btn" data-act="nv-remove">Remove download</button>' : ''}</div>
       ${IS_ANDROID ? '' : `<label class="toggle"><span>Use two processor cores when needed<small>Fewer pauses at faster speeds. Uses about 400 MB more memory and more battery while it runs.</small></span><input type="checkbox" data-nv2 ${S.nvWorkers !== 1 ? 'checked' : ''}></label>`}` : ''}`;
@@ -3583,6 +3867,8 @@ function openVoiceSheet(keepScroll) {
     else if (sl) { if (sl === 'off') Sleep.clear(); else Sleep.set(sl); openVoiceSheet(true); }
     else if (act === 'test') testVoice();
     else if (act === 'nv-load') { NPlay.unlock(); nvPreview = false; setEngine('natural'); NV.ensure().catch(() => {}); openVoiceSheet(true); }
+    else if (act === 'nv-prep') { NPlay.unlock(); NPlay.prepare().then(() => openVoiceSheet(true)); }
+    else if (act === 'nv-prep-stop') { NPlay.stopPrepare('stopped'); openVoiceSheet(true); }
     else if (act === 'nv-remove') {
       const ok = await confirmSheet('Remove the natural voice?', `This frees about ${mbOf(NV.downloadSize())} MB on this device. You can download it again later.`, 'Remove');
       if (ok) { await NV.clearCache(); toast('Natural voice removed from this device'); }
@@ -3624,13 +3910,16 @@ function setEngine(eng) {
 }
 function onNaturalChanged() {
   if (!els.sheet.hidden && els.sheet.dataset.kind === 'voice') {
-    const st = NV.state + '|' + (NV.prog ? NV.prog.phase : '') + '|' + NV.cached + '|' + App.S.engine + '|' + (NV.blocked || '');
+    const st = NV.state + '|' + (NV.prog ? NV.prog.phase : '') + '|' + NV.cached + '|' + App.S.engine + '|' + (NV.blocked || '') + '|' + (NPlay.prep ? 'prep' : '');
     const bar = $id('nvProg');
     if (st === nvSheetState && bar && NV.prog && NV.prog.total) {
       bar.value = Math.min(100, Math.round(100 * NV.prog.done / NV.prog.total));
       const tx = $id('nvProgTxt'); if (tx) tx.textContent = `${NV.cached ? 'Loading from this device' : 'Downloading'}: ${mbOf(NV.prog.done)} of ${mbOf(NV.prog.total)} MB`;
-    } else openVoiceSheet(true);
+    } else if (st !== nvSheetState) openVoiceSheet(true);
+    const pi = NPlay.prepInfo(), ptx = $id('nvPrepTxt'), pbar = $id('nvPrepBar');
+    if (pi && ptx) { ptx.textContent = prepText(pi); if (pbar) pbar.value = pi.pct; }
   }
+  if (App.model && (NPlay.prep || NPlay.prepShown)) { NPlay.prepShown = !!NPlay.prep; updateProgress(); }
   if (NPlay.waiting && NV.state === 'loading' && NV.prog && Player.playing) {
     toast(NV.prog.phase === 'download' && NV.prog.total ? `Getting the natural voice ready: ${mbOf(NV.prog.done)} of ${mbOf(NV.prog.total)} MB` : 'Getting the natural voice ready…');
   }
@@ -3707,13 +3996,14 @@ function openExportSheet() {
     finally { btns.forEach((x) => { x.disabled = false; }); }
   };
 }
-// A fingerprint of the notes' content, to tell whether they changed since the last saved notes file.
-function notesSig(n) {
-  const s = JSON.stringify([n.items.map((it) => [it.id, it.a, it.b, it.tag, it.major, it.text]), n.review]);
+// A short fingerprint of a string (FNV-1a plus length), to tell whether something changed since it was saved.
+function fnv(s) {
   let h = 2166136261;
   for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
   return (h >>> 0).toString(36) + ':' + s.length;
 }
+// A fingerprint of the notes' content, to tell whether they changed since the last saved notes file.
+function notesSig(n) { return fnv(JSON.stringify([(n.items || []).map((it) => [it.id, it.a, it.b, it.tag, it.major, it.text]), n.review])); }
 // Save the notes report PDF when leaving a proposal or reaching its end, if the notes changed since the last
 // save (or the last time the save was declined). The browser always asks the viewer to confirm a file save.
 let notesFileJob = null;
@@ -3739,7 +4029,94 @@ async function autoSaveNotesFile(why) {
   })();
   try { await notesFileJob; } finally { notesFileJob = null; }
 }
-function onFinished() { autoSaveNotesFile('reached the end'); }
+async function onFinished() { await autoSaveNotesFile('reached the end'); await autoSaveState('reached the end'); }
+
+// ── Saved state (one file you keep, for when the browser forgets this app's data) ─────────────────
+// What a saved state captures, in a form that is cheap to compare: proposals, notes, settings, and places.
+async function stateSnapshot() {
+  const docs = (await Store.all('docs')).filter((d) => d && d.id && !d.sample).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const parts = [], cur = {};
+  for (const d0 of docs) {
+    const live = !!(App.doc && App.doc.id === d0.id);
+    const d = live ? App.doc : d0;
+    const n = (live && App.notes) || (await Store.get('notes', d.id)) || emptyNotes();
+    parts.push([d.id, d.title || '', !!d.renamed, notesSig(n)]);
+    cur[d.id] = live ? App.cur : (d.cur | 0);
+  }
+  const S = { ...App.S }; delete S.spw; delete S.lastDoc; delete S.view;    // these change on their own while listening
+  return { core: fnv(JSON.stringify([parts, S])), cur, n: docs.length };
+}
+// The same state, allowing for a few sentences of listening (so moving a little does not ask for a new file).
+function sameState(a, b) {
+  if (!a || !b || a.core !== b.core) return false;
+  return Object.keys(a.cur).every((id) => id in b.cur && Math.abs(a.cur[id] - b.cur[id]) < 5);
+}
+const pad2 = (n) => String(n).padStart(2, '0');
+const fileStamp = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}${pad2(d.getMinutes())}`;
+function fmtWhen(d) {
+  const t = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const day = new Date(); day.setHours(0, 0, 0, 0);
+  const diff = Math.round((day - new Date(d.getFullYear(), d.getMonth(), d.getDate())) / 864e5);
+  return diff === 0 ? `today at ${t}` : diff === 1 ? `yesterday at ${t}` : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} at ${t}`;
+}
+// Save the state file. auto: only if something changed since the last saved (or declined) state.
+let stateJob = null;
+async function saveState(why, opt = {}) {
+  while (stateJob) await stateJob;
+  stateJob = (async () => {
+    try {
+      if (App.doc) { await savePos(); await saveNotes(); }
+      await flushSettings();
+      const snap = await stateSnapshot();
+      if (!snap.n) { if (!opt.auto) toast('Add a proposal first; there is nothing to save yet.'); return; }
+      if (opt.auto) {
+        const saved = await Store.get('kv', 'stateSaved'), declined = await Store.get('kv', 'stateDeclined');
+        if (sameState(snap, saved && saved.snap) || sameState(snap, declined && declined.snap)) return;
+      }
+      busy('Saving your state…');
+      const st = await buildStateBytes();
+      busy(false);
+      const r = await saveFile(`Proposal Listener State ${fileStamp(st.saved)}.pdf`, st.bytes, 'application/pdf');
+      if (r === 'declined') { await Store.put('kv', 'stateDeclined', { at: Date.now(), snap }); Diag.log(`state file declined (${why})`); return; }
+      await Store.put('kv', 'stateSaved', { at: st.saved.getTime(), snap });
+      await Store.del('kv', 'stateDeclined');
+      Diag.log(`state file saved (${why}; ${st.docs} proposals, ${st.notes} notes, ${(st.bytes.length / 1048576).toFixed(1)} MB)`);
+      toast('State saved');
+    } catch (e) {
+      busy(false);
+      Diag.log('state file failed: ' + ((e && e.message) || e));
+      if (!opt.auto) infoSheet('Could not save the state', errMsg(e));
+    } finally { updateStateNote(); }
+  })();
+  try { await stateJob; } finally { stateJob = null; }
+}
+function autoSaveState(why) { return App.S.autoState ? saveState(why, { auto: true }) : Promise.resolve(); }
+// After a state file was restored: apply its settings, say what came back, and reopen where you were.
+async function afterStateRestore(st, added = 0) {
+  applyLook(); speechSettingsChanged(); onNaturalChanged();
+  await Store.put('kv', 'stateSaved', { at: Date.parse(st.saved) || Date.now(), snap: await stateSnapshot() });
+  await Store.del('kv', 'stateDeclined');
+  Diag.log(`state restored (${st.docs} proposals, ${st.notes} notes${st.damaged ? `, ${st.damaged} damaged` : ''})`);
+  const when = st.saved && !isNaN(Date.parse(st.saved)) ? ` saved ${fmtWhen(new Date(st.saved))}` : '';
+  const msg = `Restored ${plural(st.docs, 'proposal', 'proposals')} and ${plural(st.notes, 'note', 'notes')}${when}.` +
+    (added ? ` Added ${plural(added, 'new proposal', 'new proposals')}.` : '') +
+    (st.damaged ? ` ${st.damaged === 1 ? 'One proposal in the file was' : `${st.damaged} proposals in the file were`} damaged and left out.` : '');
+  if (App.S.autoReopen && st.lastDoc && (await Store.get('docs', st.lastDoc))) await openDoc(st.lastDoc, { restored: true });
+  else { showScreen('lib'); await renderLibrary(); }
+  if (st.damaged) infoSheet('State restored', msg); else toast(msg);
+}
+async function updateStateNote() {
+  const el = els.stateNote; if (!el) return;
+  try {
+    const docs = (await Store.all('docs')).filter((d) => d && d.id && !d.sample);
+    if (!docs.length) { el.hidden = true; return; }
+    const saved = await Store.get('kv', 'stateSaved');
+    let txt, warn = false;
+    if (!saved) { txt = ERASES_ON_QUIT ? 'Not saved yet. This browser erases the app’s data when it quits, so tap Save state before you quit.' : 'No saved state yet.'; warn = ERASES_ON_QUIT; }
+    else { const same = sameState(await stateSnapshot(), saved.snap); txt = `State saved ${fmtWhen(new Date(saved.at))}${same ? '' : ' · changes since then'}`; warn = !same && ERASES_ON_QUIT; }
+    el.textContent = txt; el.classList.toggle('warn', warn); el.hidden = false;
+  } catch (e) { el.hidden = true; }
+}
 const safeName = (s) => String(s).replace(/[\\/:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80) || 'proposal';
 
 let dlApi;
@@ -3858,9 +4235,13 @@ function openSettingsSheet() {
       <p class="hint">Reviews are usually anonymous, so the default is “Reviewer”.</p>
     </div>
     <div><div class="sec-h">Data on this device</div>
-      <p class="hint">${Store.ok ? `PDFs, highlights, notes, and your place are saved automatically, in this browser on this device only.${App.persisted === true ? ' The browser has agreed to keep them through storage cleanups.' : App.persisted === false ? ' The browser has not promised to keep them through storage cleanups, so keep your notes PDFs too.' : ''}` : 'This browser is not keeping data between visits here, so export your notes before leaving.'}</p>
-      ${toggleRow('autoReopen', 'Reopen where I left off', 'When the app starts or the browser reloads it, open the last proposal at the word where you stopped.')}
-      <div class="row"><button type="button" class="btn" data-act="backup">Back up all notes (.json)</button><button type="button" class="btn" data-act="restore">Restore notes</button></div>
+      <p class="hint">${!Store.ok ? 'This browser is not keeping data between visits here. Save the state before you leave.'
+        : ERASES_ON_QUIT ? 'This browser erases the app’s PDFs, notes, place, and settings when it quits, because the app runs inside claude.ai (the browser’s rule for embedded pages). Save the state before you quit, and restore it when you come back.'
+        : `PDFs, highlights, notes, and your place are saved in this browser on this device.${App.persisted === true ? ' The browser has agreed to keep them through storage cleanups.' : App.persisted === false ? ' The browser has not promised to keep them through storage cleanups, so save the state now and then.' : ''}`}</p>
+      <div class="row"><button type="button" class="btn" data-act="state-save">Save state</button><button type="button" class="btn" data-act="state-restore">Restore state</button></div>
+      ${toggleRow('autoState', 'Save state automatically', 'When you leave a proposal or reach its end, if anything changed, the app offers to save one file with your proposals, notes, place, and settings. Each save asks you to confirm.')}
+      ${toggleRow('autoReopen', 'Reopen where I left off', 'When the app starts, the browser reloads it, or you restore a state, open the last proposal at the word where you stopped.')}
+      <p class="hint">The state file contains your proposal PDFs.${IS_IOS ? ' Safari saves downloads to iCloud Drive unless you change it; to keep the file on this phone, choose On My iPhone under Settings › Apps › Safari › Downloads.' : ' Keep it private.'}</p>
     </div>
     <div><div class="sec-h">Diagnostics</div>
       <p class="hint">A log of recent events on this device, with timings and error messages but no proposal text or file names. Copy it to report a problem.</p>
@@ -3889,10 +4270,8 @@ function openSettingsSheet() {
     const th = e.target.closest('[data-theme]')?.dataset.theme;
     if (th) { S.theme = th; saveSettings(); applyLook(); b.querySelectorAll('[data-theme]').forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.theme === th))); return; }
     const act = e.target.closest('[data-act]')?.dataset.act;
-    if (act === 'backup') {
-      try { const r = await saveFile(`Proposal Listener notes backup ${new Date().toISOString().slice(0, 10)}.json`, await backupAll(), 'application/json'); if (r !== 'declined') toast('Backup saved'); }
-      catch (err) { infoSheet('Backup failed', errMsg(err)); }
-    } else if (act === 'restore') els.restoreInput.click();
+    if (act === 'state-save') { closeSheet(); await saveState('button'); }
+    else if (act === 'state-restore') els.restoreInput.click();
     else if (act === 'diag-copy') copyText(await diagText());
     else if (act === 'diag-clear') { Diag.clear(); toast('Log cleared'); }
   };
@@ -3914,6 +4293,7 @@ async function diagText() {
 function openMoreSheet() {
   const b = openSheet('More', `<div class="stack">
     <button type="button" class="btn" data-act="export">${ICON('export')}Export notes</button>
+    <button type="button" class="btn" data-act="state">${ICON('export')}Save state</button>
     <button type="button" class="btn" data-act="voice">${ICON('sliders')}Voice, speed, and sleep timer</button>
     <button type="button" class="btn" data-act="listen">${ICON('phones')}Hands-free view</button>
     <button type="button" class="btn" data-act="settings">${ICON('sliders')}Settings</button>
@@ -3921,7 +4301,8 @@ function openMoreSheet() {
   </div>`);
   b.onclick = (e) => {
     const act = e.target.closest('[data-act]')?.dataset.act;
-    if (act === 'export') openExportSheet();
+    if (act === 'state') { closeSheet(); saveState('button'); }
+    else if (act === 'export') openExportSheet();
     else if (act === 'voice') openVoiceSheet();
     else if (act === 'listen') { closeSheet(); openListen(); }
     else if (act === 'settings') openSettingsSheet();
@@ -4086,6 +4467,7 @@ function wireUI() {
   els.fileInput.addEventListener('change', async () => { const f = Array.from(els.fileInput.files || []); els.fileInput.value = ''; await importFiles(f); });
   els.restoreInput.addEventListener('change', async () => { const f = Array.from(els.restoreInput.files || []); els.restoreInput.value = ''; closeSheet(); await importFiles(f); });
   els.restoreBtn.addEventListener('click', () => els.restoreInput.click());
+  els.saveStateBtn.addEventListener('click', () => saveState('button'));
   els.libSettings.addEventListener('click', openSettingsSheet);
   els.docList.addEventListener('click', (e) => {
     const li = e.target.closest('.doc'); if (!li) return;
@@ -4427,6 +4809,134 @@ async function restoreBackup(file) {
   return total;
 }
 
+// ── Saved state: one PDF that holds every proposal, its notes, your place, and the settings ─────────
+// The cover page says what is inside. The data are attachments: proposal-listener-state.json (the manifest)
+// and each proposal's original PDF, whose size and SHA-256 are checked on restore.
+async function sha256hex(u8) {
+  try { const d = await crypto.subtle.digest('SHA-256', u8); return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join(''); }
+  catch (e) { return ''; }
+}
+function notesToJSON(n) {
+  const o = { items: n.items || [], review: n.review || { rating: '', summary: '', general: '' }, heard: b64enc(n.heard instanceof Uint8Array ? n.heard : null), updated: n.updated || 0 };
+  if (n.filedSig) o.filedSig = n.filedSig;
+  if (Array.isArray(n.pending) && n.pending.length) o.pending = n.pending;
+  return o;
+}
+function notesFromJSON(j) {
+  const n = emptyNotes();
+  if (!j || typeof j !== 'object') return n;
+  n.items = Array.isArray(j.items) ? j.items.filter((x) => x && typeof x === 'object') : [];
+  n.review = { rating: '', summary: '', general: '', ...(j.review && typeof j.review === 'object' ? j.review : {}) };
+  n.heard = j.heard ? b64dec(j.heard) : null;
+  n.updated = +j.updated || 0;
+  if (j.filedSig) n.filedSig = String(j.filedSig);
+  if (Array.isArray(j.pending) && j.pending.length) n.pending = j.pending;
+  return n;
+}
+const hasNotes = (n) => !!(n && ((n.items && n.items.length) || (n.review && (n.review.rating || n.review.summary || n.review.general))));
+// Merge saved notes into notes already on this device: nothing is dropped, and the newer copy of an item wins.
+function mergeNotesRaw(target, inc) {
+  if (!target.review) target.review = { rating: '', summary: '', general: '' };
+  const byId = new Map(target.items.map((x) => [x.id, x]));
+  for (const x of inc.items) {
+    const ex = byId.get(x.id);
+    if (!ex) { target.items.push(x); byId.set(x.id, x); }
+    else if ((+x.updated || 0) > (+ex.updated || 0)) Object.assign(ex, x);
+  }
+  for (const k of ['rating', 'summary', 'general']) if (inc.review[k] && !target.review[k]) target.review[k] = inc.review[k];
+  if (inc.heard && target.heard instanceof Uint8Array && inc.heard.length === target.heard.length) { for (let i = 0; i < inc.heard.length; i++) target.heard[i] |= inc.heard[i]; }
+  else if (inc.heard && !(target.heard instanceof Uint8Array)) target.heard = inc.heard;
+  if (inc.pending) target.pending = (target.pending || []).concat(inc.pending);
+  target.updated = Math.max(+target.updated || 0, +inc.updated || 0);
+  return target;
+}
+
+async function buildStateBytes() {
+  await loadPdfLib();
+  const { PDFDocument, rgb } = window.PDFLib;
+  PdfWriter.INK = rgb(0.11, 0.13, 0.19); PdfWriter.GRAY = rgb(0.40, 0.43, 0.48); PdfWriter.LINE = rgb(0.85, 0.85, 0.82);
+  const docs = (await Store.all('docs')).filter((d) => d && d.id && !d.sample).sort((a, b) => (b.openedAt || b.addedAt || 0) - (a.openedAt || a.addedAt || 0));
+  const entries = [];
+  let totalNotes = 0;
+  for (const d0 of docs) {
+    const live = App.doc && App.doc.id === d0.id;
+    const d = live ? { ...App.doc } : d0;                     // the open proposal: its current place
+    const buf = await Store.get('files', d.id);
+    if (!buf) continue;                                       // no PDF stored, so nothing to restore it from
+    const bytes = new Uint8Array(buf);
+    const n = (live && App.notes) || (await Store.get('notes', d.id)) || emptyNotes();
+    entries.push({ file: `proposal-${entries.length + 1}.pdf`, size: bytes.length, sha256: await sha256hex(bytes), doc: d, notes: notesToJSON(n), bytes });
+    totalNotes += (n.items || []).length;
+  }
+  const now = new Date();
+  const manifest = { app: 'proposal-listener', kind: 'state', v: STATE_V, saved: now.toISOString(), build: BUILD, settings: { ...App.S }, docs: entries.map(({ bytes, ...e }) => e) };
+  const doc = await PDFDocument.create();
+  doc.registerFontkit(window.fontkit);
+  const fb = fontBytes();
+  const F = { r: await doc.embedFont(fb.reg, { subset: false }), b: await doc.embedFont(fb.bold, { subset: false }), i: await doc.embedFont(fb.ital, { subset: false }) };
+  const W = new PdfWriter(doc, F);
+  const stamp = now.toLocaleString([], { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  W.text('PROPOSAL LISTENER', { font: F.b, size: 8.5, color: PdfWriter.GRAY, after: 3 });
+  W.text('Saved State', { font: F.b, size: 17, lh: 22, after: 4 });
+  W.text(`Saved ${stamp} · ${plural(entries.length, 'proposal', 'proposals')} · ${plural(totalNotes, 'note', 'notes')} · your place in each proposal and your settings`, { size: 8.5, color: PdfWriter.GRAY, after: 12 });
+  W.text('To restore, open Proposal Listener, tap Restore state, and choose this file.', { after: 4 });
+  W.text('This file contains the proposal PDFs. Keep it private.', { color: PdfWriter.GRAY, after: 8 });
+  if (entries.length) W.heading('Proposals');
+  entries.forEach((e, k) => {
+    const d = e.doc, n = e.notes;
+    W.ensure(40);
+    W.text(`${k + 1}. ${d.title || d.name}`, { font: F.b, size: 10.5, after: 1 });
+    W.text(`${d.name} · ${plural(d.nPages || 0, 'page', 'pages')} · ${d.heardPct || 0}% heard · ${plural(n.items.length, 'note', 'notes')}${n.review.rating ? ' · Rating: ' + n.review.rating : ''}`, { size: 8.5, color: PdfWriter.GRAY, x: W.m + 14, after: 8 });
+  });
+  if (!entries.length) W.text('No proposals.', { color: PdfWriter.GRAY });
+  W.footers('Confidential: contains proposal PDFs');
+  doc.setTitle('Proposal Listener Saved State');
+  doc.setSubject('Proposals, notes, places, and settings saved by Proposal Listener');
+  doc.setCreator('Proposal Listener');
+  doc.setProducer('Proposal Listener');
+  await doc.attach(new TextEncoder().encode(JSON.stringify(manifest)), STATE_FILE, { mimeType: 'application/json', description: 'Proposal Listener saved state: notes, places, and settings.', creationDate: now, modificationDate: now });
+  for (const e of entries) await doc.attach(e.bytes, e.file, { mimeType: 'application/pdf', description: 'Proposal PDF', creationDate: now, modificationDate: now });
+  return { bytes: await doc.save(), docs: entries.length, notes: totalNotes, saved: now };
+}
+
+// Restore from a state PDF already open in pdf.js (list: its attachments). Proposals in the file replace the stored
+// copies (their notes are merged with any made here since), proposals not in the file stay, and the saved settings
+// replace the current ones.
+async function restoreStateFromPdf(pdf, list) {
+  const man = list.find((e) => e.name.endsWith(STATE_FILE));
+  let j = null;
+  try { j = JSON.parse(new TextDecoder().decode(await withTimeout(pdfAttachmentBytes(pdf, man), 60000, 'The PDF engine did not respond.'))); }
+  catch (e) { if (e && e.timeout) throw new UserError('The PDF engine did not respond. Try again.'); }
+  if (!j || j.app !== 'proposal-listener' || j.kind !== 'state') throw new UserError('This file is not a Proposal Listener state file.');
+  if ((+j.v || 0) > STATE_V) throw new UserError('This state file comes from a newer version of the app. Reload the app, then try again.');
+  const byName = new Map(list.map((e) => [e.name, e]));
+  const out = { docs: 0, notes: 0, damaged: 0, saved: typeof j.saved === 'string' ? j.saved : '', lastDoc: '' };
+  const ids = new Set();
+  for (const e of Array.isArray(j.docs) ? j.docs : []) {
+    const d = e && e.doc;
+    if (!d || typeof d.id !== 'string' || !d.id) continue;
+    const fe = byName.get(e.file);
+    let bytes = null;
+    try { bytes = fe ? await withTimeout(pdfAttachmentBytes(pdf, fe), 120000, 'The PDF engine did not respond.') : null; } catch (err) { bytes = null; }
+    const h = bytes && e.sha256 ? await sha256hex(bytes) : '';
+    if (!bytes || (e.size && bytes.length !== e.size) || (h && h !== e.sha256)) { out.damaged++; Diag.log('state restore: a proposal in the file is damaged or missing'); continue; }
+    await Store.put('files', d.id, bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : bytes.slice().buffer);
+    const saved = notesFromJSON(e.notes);
+    const local = await Store.get('notes', d.id);
+    const notes = hasNotes(local) ? mergeNotesRaw(local, saved) : saved;
+    await Store.put('notes', d.id, notes);
+    await Store.put('docs', d.id, { ...d, sample: false, nNotes: notes.items.length });
+    ids.add(d.id); out.docs++; out.notes += notes.items.length;
+  }
+  if (j.settings && typeof j.settings === 'object') {
+    for (const k of Object.keys(DEFAULTS)) if (k in j.settings && typeof j.settings[k] === typeof DEFAULTS[k]) App.S[k] = j.settings[k];
+    if (App.S.lastDoc && !ids.has(App.S.lastDoc) && !(await Store.get('docs', App.S.lastDoc))) App.S.lastDoc = '';
+    out.lastDoc = App.S.lastDoc;
+    await flushSettings();
+  }
+  return out;
+}
+
 // ── Built-in sample (fictional), generated on demand ───────────────────────
 const SAMPLE = {
   title: 'Sample: Warm Dust in the Habitable Zones of Nearby Stars',
@@ -4517,7 +5027,7 @@ async function boot() {
     } catch (e) { Diag.log('could not reopen the last proposal: ' + ((e && e.message) || e)); App.S.lastDoc = ''; flushSettings(); busy(false); showScreen('lib'); }
   }
   PDF.init().catch((e) => console.warn('PDF engine', e));
-  window.PL = { App, Player, PDF, Store, Voices, Sleep, parseDocument, splitSentences, buildRules, speechFor, stripMarks, fmt, importBytes, openDoc, closeDoc, exportReportBytes, exportAnnotatedBytes, reviewText, backupAll, restoreBackup, makeSamplePdf, setCur, addHL, openSentenceSheet, mergeNotes, toast, NV, NPlay, NVGuard, openVoiceSheet, useNatural, spoken, nextPlayable, Diag, diagText, Alive };
+  window.PL = { App, Player, PDF, Store, Voices, Sleep, parseDocument, splitSentences, buildRules, speechFor, stripMarks, fmt, importBytes, openDoc, closeDoc, exportReportBytes, exportAnnotatedBytes, reviewText, backupAll, restoreBackup, makeSamplePdf, setCur, addHL, saveState, buildStateBytes, stateSnapshot, ClipStore, openSentenceSheet, mergeNotes, toast, NV, NPlay, NVGuard, openVoiceSheet, useNatural, spoken, nextPlayable, Diag, diagText, Alive };
   document.documentElement.dataset.ready = '1';
 }
 boot().catch((e) => {
