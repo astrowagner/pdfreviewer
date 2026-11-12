@@ -248,11 +248,19 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .vrow .vmeta { flex: none; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
 .vrow[aria-checked=true] { color: var(--accent); font-weight: 700; }
 .vrow[aria-checked=true] .vname::before { content: "● "; }
-.vrow.toc.lvl2 .vname { padding-left: 14px; font-size: 14.5px; }
 .vrow.toc.here .vname { color: var(--accent); font-weight: 700; }
-.toc-more { padding: 8px 4px 10px; border-bottom: 1px solid var(--line); }
-.vrow.toc.toc-sub .vname { padding-left: 22px; }
 .vrow[hidden] { display: none; }
+.vrow.toc { justify-content: flex-start; gap: 4px; padding-left: 0; }
+.vrow.toc .vname { flex: 1; overflow-wrap: anywhere; }
+.vrow.toc .tw { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; margin: -8px 0; padding: 0; border: 0; border-radius: 10px; background: transparent; color: var(--muted); cursor: pointer; }
+.vrow.toc .tw .ic { width: 17px; height: 17px; transition: transform .15s ease; }
+.vrow.toc .tw[aria-expanded=true] .ic { transform: rotate(90deg); }
+.vrow.toc .tw-sp { flex: none; width: 40px; }
+.vrow.toc.grp .vname { font-weight: 650; }
+.vrow.toc.kid .vname { font-size: 14.5px; padding-left: 14px; }
+.vrow.toc.kid.d3 .vname { padding-left: 28px; }
+.vrow.toc.kid.d4 .vname { padding-left: 42px; }
+.toc-tools { display: flex; justify-content: flex-end; margin: -4px 0 2px; }
 .vrow mark { background: var(--h-note); color: inherit; border-radius: 2px; }
 .ncard { display: grid; gap: 6px; padding: 12px 12px 12px 14px; border: 1px solid var(--line); border-left: 4px solid var(--tc); border-radius: 12px; background: var(--paper); }
 .ncard .nhead { display: flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 750; color: var(--tc); }
@@ -317,6 +325,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
     <symbol id="i-prev" viewBox="0 0 24 24"><rect x="5" y="6" width="2.3" height="12" rx="1" fill="currentColor"/><path d="M18.6 6.7v10.6a.7.7 0 0 1-1.1.6l-8-5.3a.7.7 0 0 1 0-1.2l8-5.3a.7.7 0 0 1 1.1.6z" fill="currentColor"/></symbol>
     <symbol id="i-next" viewBox="0 0 24 24"><rect x="16.7" y="6" width="2.3" height="12" rx="1" fill="currentColor"/><path d="M5.4 6.7v10.6a.7.7 0 0 0 1.1.6l8-5.3a.7.7 0 0 0 0-1.2l-8-5.3a.7.7 0 0 0-1.1.6z" fill="currentColor"/></symbol>
     <symbol id="i-back" viewBox="0 0 24 24"><path d="M14.5 5.5L8 12l6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-chev" viewBox="0 0 24 24"><path d="M9.5 5.5L16 12l-6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-notes" viewBox="0 0 24 24"><path d="M5 4.5h14a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1h-8l-4.5 3.5v-3.5H5a1 1 0 0 1-1-1v-10a1 1 0 0 1 1-1z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 9h8M8 12.5h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M15 15l5 5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></symbol>
@@ -1123,7 +1132,7 @@ this.workerSrc)).WorkerMessageHandler})())}}class WorkerTransport{downloadInfoCa
 // Everything here runs locally in the browser.
 // ───────────────────────────────────────────────────────────────────────────
 
-const PARSER_VERSION = 5;
+const PARSER_VERSION = 6;
 const SUP_O = '', SUP_C = '', SUB_O = '', SUB_C = '';
 const MARKS_RE = /[-]/g;
 const stripMarks = (s) => s.replace(MARKS_RE, '');
@@ -1360,6 +1369,7 @@ function isNumericToken(tok) {
   if (/^[×±~∼≈<>=–—\-−+%]$/.test(t)) return true;
   return /\d/.test(t) && /^[\d.,−\-+×x^%()\[\]±~∼≈<>=/]+$/.test(t);
 }
+const NUMBERED_HEAD = /^((\d+(\.\d+)*\.?)|([A-Z]\.)|([IVXLC]+\.))\s+[A-ZΑ-Ω]/;
 function isHeadingText(t, nLines, ratio) {
   if (!t || t.length > 140 || nLines > 3) return false;
   // Form questions ("Question 3 : …", "1. Is this a resubmission?", long questions) are not section titles;
@@ -1369,8 +1379,10 @@ function isHeadingText(t, nLines, ratio) {
   const words = t.split(/\s+/).length;
   const endsPunct = /[.;,:]$/.test(t);
   const big = ratio >= 1.12;
-  const numbered = /^((\d+(\.\d+)*\.?)|([A-Z]\.)|([IVXLC]+\.))\s+[A-ZΑ-Ω]/.test(t) && words <= 14;
-  const caps = t.length >= 4 && t === t.toUpperCase() && /[A-Z]{3}/.test(t) && words <= 12;
+  const numbered = NUMBERED_HEAD.test(t) && words <= 14;
+  // All capitals with at least one real word: "SECTION II - BUDGET" is a heading, "NNH25ZDA001N-APRA" (an ID) is not.
+  const capsWord = t.split(/\s+/).some((w) => { const x = w.replace(/^[^A-Z0-9]+|[^A-Z0-9]+$/g, ''); return /^[A-Z]+([-\/'][A-Z]+)*$/.test(x) && x.replace(/[^A-Z]/g, '').length >= 3; });
+  const caps = t.length >= 4 && t === t.toUpperCase() && capsWord && words <= 12;
   if (big) return !endsPunct || t.length < 60;
   if (numbered) return nLines <= 2 && (!endsPunct || t.length < 60) && !/[.!?]\s+[A-Z]/.test(t.replace(/^\S+\s+/, ''));
   if (caps) return nLines <= 2;
@@ -1431,7 +1443,8 @@ function classify(blocks, metrics, pages) {
     let k = 'p';
     if (f.rotFrac > 0.5) k = 'fig';
     else if (captionStart(f.t, f.ratio)) k = 'cap';
-    else if (isHeadingText(f.t, f.n, f.ratio)) k = 'h';
+    // A row of numbers or a table row ("C. Direct Costs - Equipment 10,404.00 45,632.00 …") is not a heading.
+    else if (!(f.nt >= 3 && f.numTok >= 0.45 * f.nt) && f.wide < 2 && isHeadingText(f.t, f.n, f.ratio)) k = 'h';
     else if (f.ratio <= 0.9 && nearBottom && (B.text.startsWith(SUP_O) || /^(\d{1,2}(?![\d.,:])|[*†‡§])\s*\S/.test(f.t))) k = 'fn';
     // Clear figure or table text: mostly numbers, or a grid with wide column gaps.
     else if (!f.form && !f.prose && ((f.nt >= 3 && f.numTok >= 0.45 * f.nt) || (f.wide >= 1.5 && (f.n >= 2 || f.numTok >= 0.2 * f.nt)) || f.wide >= 3)) k = 'fig';
@@ -1455,7 +1468,8 @@ function classify(blocks, metrics, pages) {
     if (formRows >= 2 || valueWords < 5) B.k = 'p';
   }
   const heads = [];
-  blocks.forEach((B, i) => { if (B.k === 'h') heads.push(i); });
+  // Numbered headings ("A. Direct Labor", "1.2 Methods") are kept: the Sections list groups them instead.
+  blocks.forEach((B, i) => { if (B.k === 'h' && !NUMBERED_HEAD.test(B.f.t)) heads.push(i); });
   const tokensBetween = (a, b) => { let w = 0; for (let j = a + 1; j < b; j++) w += blocks[j].f.nt; return w; };
   for (let x = 0; x < heads.length;) {
     let y = x;
@@ -1553,24 +1567,36 @@ function mergeAcrossPages(blocks) {
   return out;
 }
 
-// Leading pages that read as a form rather than as text (cover pages, title page): most of their characters
-// are labels, values, tables or headings. One text page between form pages (a summary) is included.
-function coverPageCount(blocks, nPages) {
-  const tot = new Array(nPages + 2).fill(0), prose = new Array(nPages + 2).fill(0);
+// Pages that read as a form rather than as text (cover pages, budget forms, title page): most of their characters
+// are labels, values, tables or headings, or they hold five or more short "Label: value" rows or questions.
+// `cover` counts the leading run of such pages; one text page between form pages (a summary) is included
+// unless it starts a numbered section.
+function formPages(blocks, nPages) {
+  const tot = new Array(nPages + 2).fill(0), prose = new Array(nPages + 2).fill(0), rows = new Array(nPages + 2).fill(0);
+  const numberedHead = new Array(nPages + 2).fill(false);
   for (const B of blocks) {
+    if (B.ref) continue;
     const c = B.f ? B.f.chars : stripMarks(B.text).length;
     tot[B.page] += c;
-    if ((B.k === 'p' || B.k === 'cap' || B.k === 'fn') && !B.ref && B.f && B.f.prose && !B.f.form && (B.lines.length >= 2 || c >= 80)) prose[B.page] += c;
+    if ((B.k === 'p' || B.k === 'cap' || B.k === 'fn') && B.f && B.f.prose && !B.f.form && (B.lines.length >= 2 || c >= 80)) prose[B.page] += c;
+    if (B.k === 'h' && NUMBERED_HEAD.test(stripMarks(B.text).trim())) numberedHead[B.page] = true;
+    if (B.k === 'cap') continue;
+    for (const L of B.lines) {
+      const x = stripMarks(L.text).trim();
+      if (L.page === B.page && (QUESTION_START.test(x) || ((FORM_LINE.test(x) || ENDS_Q.test(x)) && x.length <= 70))) rows[B.page]++;
+    }
   }
-  const formPage = (p) => tot[p] >= 30 && prose[p] < 0.5 * tot[p];
+  const isForm = (p) => tot[p] >= 30 && (prose[p] < 0.5 * tot[p] || rows[p] >= 5);
+  const forms = [];
+  for (let p = 1; p <= nPages; p++) if (isForm(p)) forms.push(p);
   let k = 0, last = 0;
   for (let p = 1; p <= nPages; p++) {
     if (tot[p] < 30) { if (last === p - 1) last = p; continue; }        // blank or image-only page
-    if (formPage(p)) { k = p; last = p; continue; }
-    if (k && last === p - 1 && p < nPages && formPage(p + 1)) { last = p; continue; }
+    if (isForm(p)) { k = p; last = p; continue; }
+    if (k && last === p - 1 && p < nPages && isForm(p + 1) && !numberedHead[p]) { last = p; continue; }
     break;
   }
-  return k >= nPages ? 0 : k;
+  return { cover: k >= nPages ? 0 : k, forms: forms.length >= nPages ? [] : forms };
 }
 
 // ── 7. Sentences ───────────────────────────────────────────────────────────
@@ -1669,7 +1695,11 @@ function buildSentences(blocks) {
       const r = rectsFor(B.segs, a, b);
       sents.push({ t, b: outBlocks.length, k: B.k, ref: !!B.ref, p: r.length ? r[0][0] : B.page, r });
     }
-    if (sents.length > s0) outBlocks.push({ k: B.k, ref: !!B.ref, p: B.page, s0, s1: sents.length, lvl: B.k === 'h' ? (B.ratio >= 1.25 ? 1 : 2) : 0 });
+    if (sents.length > s0) {
+      const o = { k: B.k, ref: !!B.ref, p: B.page, s0, s1: sents.length, lvl: B.k === 'h' ? (B.ratio >= 1.25 ? 1 : 2) : 0 };
+      if (B.k === 'h') o.r = +B.ratio.toFixed(3);        // type size relative to body text, for the Sections outline
+      outBlocks.push(o);
+    }
   }
   return { sents, blocks: outBlocks };
 }
@@ -1694,14 +1724,14 @@ async function parseDocument(pdf, opts = {}) {
   let blocks = buildBlocks(pagesLines, metrics);
   classify(blocks, metrics, pages);
   blocks = mergeAcrossPages(blocks);
-  const cover = coverPageCount(blocks, pages.length);
+  const { cover, forms } = formPages(blocks, pages.length);
   const { sents, blocks: outBlocks } = buildSentences(blocks);
   const chars = sents.reduce((s, x) => s + stripMarks(x.t).length, 0);
   return {
     v: PARSER_VERSION,
     nPages: pages.length,
     pages: pages.map((p) => ({ view: p.view.map((x) => +(+x).toFixed(2)), rot: p.rot })),
-    sents, blocks: outBlocks, chars, cover,
+    sents, blocks: outBlocks, chars, cover, forms,
     words: sents.reduce((s, x) => s + countWords(x.t), 0),
   };
 }
@@ -1911,7 +1941,7 @@ const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = se
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const reduceMotion = () => !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
 class UserError extends Error {}
-const BUILD = "2026-11-12 01:30 UTC, ac9d1ac";
+const BUILD = "2026-11-12 02:20 UTC, 4ea7562";
 // Diagnostic log kept on this device (localStorage) so problems on a phone can be reported.
 // It holds events, counts, sizes, and timings only: never proposal text or file names.
 const Diag = {
@@ -1931,11 +1961,13 @@ const Diag = {
   },
   clear() { this.lines = []; try { localStorage.removeItem(this.KEY); } catch (e) { /* ignore */ } },
 };
-// Marks the page as open while visible; if it is still marked at the next start, the page stopped
-// unexpectedly while in use (for example, the system closed it for using too much memory).
+// Marks the page as in use while it is visible or playing with the screen off; if it is still marked at the next
+// start, the page stopped unexpectedly while in use (for example, the system closed it for using too much memory).
 const Alive = {
-  set(on) { try { localStorage.setItem('pl-alive', on ? '1' : '0'); } catch (e) { /* not available */ } },
-  check() { let v = null; try { v = localStorage.getItem('pl-alive'); } catch (e) { /* ignore */ } this.set(!document.hidden); return v === '1'; },
+  last: '',
+  set(on) { const v = on === true ? '1' : on === false ? '0' : on; try { localStorage.setItem('pl-alive', v); } catch (e) { /* not available */ } },
+  mark() { this.set(!document.hidden ? '1' : (typeof Player !== 'undefined' && Player.playing) ? 'p' : '0'); },
+  check() { let v = null; try { v = localStorage.getItem('pl-alive'); } catch (e) { /* ignore */ } this.last = v || ''; this.set(!document.hidden); return v === '1' || v === 'p'; },
 };
 // Promise with a time limit; the error carries .timeout so callers can recover.
 function withTimeout(p, ms, msg) {
@@ -2600,6 +2632,7 @@ const NV = {
     const slot = this.spawn();
     this.readyP = slot.ready.then(() => {
       this.state = 'ready'; this.cached = true; this.prog = null; this.wasReady = true; this.changed(); this.pump();
+      if (typeof NPlay !== 'undefined') NPlay.retriedStart = false;
       Diag.log(`voice: ready in ${Math.round(performance.now() - t0)} ms`);
       NPlay.warm();
       this.idleSoon();
@@ -2784,9 +2817,26 @@ const NV = {
   // or if the page once stopped unexpectedly while two were running.
   maxWorkers() {
     if (this.single || App.S.nvWorkers === 1 || IS_ANDROID) return 1;
-    if (IS_IOS) return 2;                                  // iPhones have 6 cores
+    // iPhone: one unless turned on, and never two with the screen locked. Two use about 800 MB, and Safari closes
+    // pages that use that much, mostly in the background.
+    if (IS_IOS) return App.S.nvWorkers === 2 && !document.hidden ? 2 : 1;
     const hc = navigator.hardwareConcurrency || 0;
     return hc >= 4 ? 2 : 1;
+  },
+  // Keep only as many workers as allowed now (called when the page is hidden).
+  trim() { while (this.slots.length > this.maxWorkers()) { Diag.log('voice: stopped the second worker (screen off)'); this.drop(this.slots[this.slots.length - 1]); } },
+  // Free the model's memory while playing when the rest of the proposal is already made (kept on this device or
+  // in memory). Playback goes on from those clips; the model loads again if a sentence without speech comes up.
+  release(why) {
+    if (this.state !== 'ready' || this.queue.length || this.jobs.size || NPlay.prep) return false;
+    clearTimeout(this.idleT);
+    NVGuard.off();
+    for (const s of this.slots) { clearTimeout(s.timer); try { s.w.terminate(); } catch (e) { /* ignore */ } }
+    this.slots = []; this.readyP = null; this.prog = null; this.growing = false;
+    this.state = 'off';
+    Diag.log('voice: model unloaded while playing (' + why + ')');
+    this.changed();
+    return true;
   },
   // Is the voice made more slowly than it plays, with the workers it has?
   behind() {
@@ -3082,6 +3132,20 @@ const NPlay = {
     if (model) NV.retain(want);
     // Playing speech kept on this device with the voice unloaded: load it in time for the first sentence it lacks.
     else if (missing && this.active && Player.state === 'playing' && NV.state === 'off') NV.ensure().then(() => this.prefetch(this.idx), () => {});
+    // Everything from here to the end is made: free the model's memory while this plays (checked every 20 s at most).
+    if (!missing && NV.state === 'ready' && this.active && Player.state === 'playing' && !this.prep && performance.now() - (this.relAt || 0) > 20000) {
+      this.relAt = performance.now();
+      if (this.restReady(i)) NV.release('the rest of the proposal is ready');
+    }
+  },
+  // Is speech made for every sentence from i to the end (in memory or kept on this device)?
+  restReady(i) {
+    const voice = NV.voice(); if (!voice) return false;
+    for (let k = nextPlayable(Math.max(i, 0), 1); k >= 0; k = nextPlayable(k + 1, 1)) {
+      const sp = spoken(k); if (!sp) continue;
+      if (!NV.peek(sp.text, voice) && !ClipStore.has(NV.key(sp.text, voice))) return false;
+    }
+    return true;
   },
   onEnded() {
     if (!this.active || this.quiet || Player.state !== 'playing' || this.waiting) return;
@@ -3164,6 +3228,24 @@ const NPlay = {
       Diag.log('voice: stopped after a failure');
       if (playing) { this.halt(); Player.state = 'paused'; Player.resumeChar = ch; syncPlayUI(); Wake.off(); Media.update(); savePos(); }
       toast('The natural voice stopped (' + ((e && e.message) || 'unknown error') + '). Tap play to try again, or choose Device voices under Voice.');
+      NV.changed();
+      return;
+    }
+    // The voice files are on this device but the model did not load (often memory, right after Safari reloaded the
+    // page): try again once, then pause and say so, rather than switch to the device voice.
+    if (NV.cached) {
+      const playing = this.active && Player.state === 'playing', i = App.cur, ch = Player.lastChar || 0;
+      NV.state = 'off'; NV.error = '';
+      if (playing && !this.retriedStart) {
+        this.retriedStart = true;
+        Diag.log('voice: could not start; trying again');
+        this.halt(); Player.state = 'idle';
+        setTimeout(() => { if (Player.state === 'idle' && App.S.engine === 'natural' && App.cur === i) Player.play(i, ch); }, 2000);
+        return;
+      }
+      Diag.log('voice: could not start after a second try');
+      if (playing) { this.halt(); Player.state = 'paused'; Player.resumeChar = ch; syncPlayUI(); Wake.off(); Media.update(); savePos(); }
+      toast('The natural voice could not start (' + ((e && e.message) || 'unknown error') + '). Tap play to try again, or choose Device voices under Voice.');
       NV.changed();
       return;
     }
@@ -3777,6 +3859,7 @@ function updateProgress() {
 
 function syncPlayUI() {
   const playing = Player.playing;
+  if (document.hidden) Alive.mark();                 // playing with the screen off counts as in use
   const icon = playing ? 'pause' : 'play';
   const wait = playing && NPlay.waiting;
   if (els.playBtn) { els.playBtn.innerHTML = ICON(icon); els.playBtn.setAttribute('aria-label', wait ? 'Preparing the voice. Pause' : playing ? 'Pause' : 'Play'); els.playBtn.classList.toggle('wait', wait); }
@@ -4013,7 +4096,7 @@ function openVoiceSheet(keepScroll) {
   const naturalPanel = `${nvStatusHtml()}${prepHtml()}
       ${NV.supported() ? `<ul class="list" role="radiogroup" aria-label="Natural voices">${NV.voices().map((v) => `<li class="vrow" role="radio" tabindex="0" aria-checked="${nvVoice && v.id === nvVoice.id}" data-nvid="${esc(v.id)}"><span class="vname">${esc(v.name)}</span><span class="vmeta">${v.lang === 'b' ? 'British' : 'American'} · ${v.gender === 'F' ? 'female' : 'male'}${/^A/.test(v.grade) ? ' · most natural' : ''}</span></li>`).join('')}</ul>
       <div class="row">${NV.state === 'ready' ? '<button type="button" class="btn" data-act="test">Test voice</button>' : ''}${NV.cached && NV.state !== 'loading' ? '<button type="button" class="btn" data-act="nv-remove">Remove download</button>' : ''}</div>
-      ${IS_ANDROID ? '' : `<label class="toggle"><span>Use two processor cores when needed<small>Fewer pauses at faster speeds. Uses about 400 MB more memory and more battery while it runs.</small></span><input type="checkbox" data-nv2 ${S.nvWorkers !== 1 ? 'checked' : ''}></label>`}` : ''}`;
+      ${IS_ANDROID ? '' : `<label class="toggle"><span>Use two processor cores when needed<small>${IS_IOS ? 'Faster with the screen on. Uses about 400 MB more memory; Safari may close the page when memory runs short. Off by default on iPhone.' : 'Fewer pauses at faster speeds. Uses about 400 MB more memory and more battery while it runs.'}</small></span><input type="checkbox" data-nv2 ${(IS_IOS ? S.nvWorkers === 2 : S.nvWorkers !== 1) ? 'checked' : ''}></label>`}` : ''}`;
   const devicePanel = `${vs.length ? `<ul class="list" role="radiogroup" aria-label="Voices">${vs.map((v) => { const q = Voices.quality(v); return `<li class="vrow" role="radio" tabindex="0" aria-checked="${Voices.id(v) === curId}" data-vid="${esc(Voices.id(v))}"><span class="vname">${esc(v.name)}</span><span class="vmeta">${esc(v.lang || '')}${q >= 3 ? ' · premium' : q === 2 ? ' · enhanced' : ''}${v.localService === false ? ' · network' : ''}</span></li>`; }).join('')}</ul>`
         : `<p class="hint">${window.speechSynthesis ? (S.localOnly && Voices.list.length ? 'No on-device voices match. Turn on “Show all voices” or allow network voices below.' : 'No voices have loaded yet. They can take a moment; close and reopen this panel.') : 'This browser does not support speech.'}</p>`}
       <div class="row"><button type="button" class="btn" data-act="test">Test voice</button></div>
@@ -4066,7 +4149,7 @@ function openVoiceSheet(keepScroll) {
     if (t.id === 'rateRange') { setRate(+t.value); }
     else if (t.id === 'pitchRange') { S.pitch = +t.value; saveSettings(); Player.restart(); }
     else if (t.hasAttribute('data-nv2')) {
-      S.nvWorkers = t.checked ? 0 : 1; saveSettings();
+      S.nvWorkers = t.checked ? (IS_IOS ? 2 : 0) : 1; saveSettings();     // on iPhone two run only when turned on
       if (!t.checked) while (NV.slots.length > 1) NV.drop(NV.slots[NV.slots.length - 1]);
       else { NV.single = false; NV.pump(); }
       openVoiceSheet(true);
@@ -4341,36 +4424,126 @@ function sectionCoverage(i) {
   for (let j = i + 1; j < M.sents.length; j++) if (M.sents[j].k === 'h') { end = j; break; }
   return heardPctOf(M, App.notes, App.S, i, end);
 }
-// Headings on the leading cover pages (pages that read as a form) fold into one "Cover pages" entry.
-function coverGroup(M, heads) {
-  const pages = M.cover | 0;
-  if (!pages) return null;
-  const items = heads.filter((B) => B.p <= pages);
-  if (items.length < 2) return null;
-  const j = M.sents.findIndex((s) => s.p > pages);
-  return { pages, items, end: j < 0 ? M.sents.length : j };
+// ── Sections outline: cover pages and budget pages fold into one entry each; sections fold their subsections ──
+const BUDGET_HEAD = /\b(direct labor|direct costs?|other direct costs|indirect costs?|total direct|fringe benefits|budget period|cumulative budget|budget summary|senior personnel|total costs? with fee)\b/i;
+const BUDGET_WORDS = /\b(direct labor|direct costs?|indirect costs?|fringe benefits?|salar(y|ies)|key personnel|other personnel|senior personnel|equipment|travel|participant|total direct|funds requested|budget period|cumulative budget)\b/gi;
+const TOP_HEAD = /^((\d+(\.\d+)*\.?|[A-Z]\.|[IVXLC]+\.)\s*)?(references( cited)?|bibliography|literature cited|works cited|data (management|sharing)( plan)?|open science and data management plan|biographical sketch(es)?|current and pending( support)?|budget (justification|narrative)|facilities|table of personnel|summary of (personnel and )?work effort|statement of work|letters? of (support|commitment|resource support)|appendi(x|ces)|acronyms|abbreviations|project (summary|description)|management plan)\b/i;
+function headNumbering(t) {
+  let m = /^(\d+(?:\.\d+)*)\.?\s/.exec(t);
+  if (m) return { style: 'd', d: m[1].split('.').length };
+  m = /^([A-Z]|[IVXLC]+)\.(\d+(?:\.\d+)*)?\s/.exec(t);                 // "A. ", "II. ", "A.1 "
+  if (m) return { style: 'a', d: 1 + (m[2] ? m[2].split('.').length : 0) };
+  return null;
+}
+function tocOutline(M) {
+  const heads = M.blocks.filter((B) => B.k === 'h' && !B.ref);
+  const textOf = (B) => stripMarks(M.sents[B.s0].t).trim();
+  const forms = new Set(M.forms || []);
+  const cover = M.cover | 0;
+  // Budget pages: form pages that use budget words (direct labor, fringe benefits, travel, …).
+  const budget = new Set();
+  for (const p of forms) {
+    const words = new Set();
+    for (const i of M.byPage[p] || []) for (const w of stripMarks(M.sents[i].t).match(BUDGET_WORDS) || []) words.add(w.toLowerCase());
+    if (words.size >= 3) budget.add(p);
+  }
+  const zone = (B) => (budget.has(B.p) || (forms.has(B.p) && BUDGET_HEAD.test(textOf(B))) ? 'budget' : B.p <= cover ? 'cover' : 'body');
+  const firstOn = (p) => { const a = M.byPage[p]; if (a && a.length) return a[0]; const j = M.sents.findIndex((s) => s.p >= p); return j < 0 ? 0 : j; };
+  const items = [];
+  let g = null;
+  for (const B of heads) {
+    const z = zone(B);
+    if (z === 'body') { g = null; items.push({ kind: 'head', B, kids: [] }); continue; }
+    if (!g || g.zone !== z) { g = { kind: 'group', zone: z, kids: [] }; items.push(g); }
+    g.kids.push(B);
+  }
+  const coverPages = [];
+  for (let p = 1; p <= cover; p++) if (!budget.has(p)) coverPages.push(p);
+  if (coverPages.length && !(items[0] && items[0].zone === 'cover')) items.unshift({ kind: 'group', zone: 'cover', kids: [] });
+  // Outline depth of the proposal's own headings: numbering first ("2.1" sits under "2"), then type size.
+  const body = items.filter((x) => x.kind === 'head').map((x) => x.B);
+  const rOf = (B) => (typeof B.r === 'number' ? B.r : B.lvl === 1 ? 1.3 : 1.1);
+  let topStyle = null;
+  for (const B of body) { const n = headNumbering(textOf(B)); if (n) { topStyle = n.style; break; } }
+  const titleB = body.length > 1 && !headNumbering(textOf(body[0])) && rOf(body[0]) > Math.max(...body.slice(1).map(rOf)) + 0.05 ? body[0] : null;
+  const topRs = body.filter((B) => { const n = headNumbering(textOf(B)); return n && n.style === topStyle && n.d === 1; }).map(rOf).sort((a, b) => a - b);
+  const topR = topRs.length ? topRs[topRs.length >> 1] : Math.max(0, ...body.filter((B) => B !== titleB).map(rOf));
+  const depthOf = (B) => {
+    if (B === titleB) return 1;
+    const t = textOf(B), n = headNumbering(t);
+    if (n) return n.style === topStyle ? n.d : n.d + 1;
+    if (TOP_HEAD.test(t) || (t === t.toUpperCase() && /[A-Z]{3}/.test(t))) return 1;
+    return rOf(B) >= topR - 0.03 ? 1 : 2;
+  };
+  const out = [];
+  let parent = null;
+  for (const x of items) {
+    if (x.kind === 'group') { out.push(x); parent = null; continue; }
+    const d = depthOf(x.B);
+    if (d > 1 && parent) { parent.kids.push(x.B); parent.depth.set(x.B, d); continue; }
+    const it = { kind: 'head', B: x.B, kids: [], depth: new Map() };
+    out.push(it);
+    parent = x.B === titleB ? null : it;
+  }
+  // Inside a group: a heading in capitals starts a block ("BUDGET PERIOD 1"), lettered items ("A. Direct Labor")
+  // sit under it, and numbered line items ("1 Secretarial / Clerical") under those.
+  for (const it of out) {
+    if (it.kind !== 'group') continue;
+    it.depth = new Map();
+    let base = 2, letter = 0;
+    for (const B of it.kids) {
+      const t = textOf(B), n = headNumbering(t);
+      if (!n && t === t.toUpperCase() && /[A-Z]{3}/.test(t)) { it.depth.set(B, 2); base = 3; letter = 0; }
+      else if (n && n.style === 'a') { it.depth.set(B, base); letter = base; }
+      else if (n && n.style === 'd' && letter) it.depth.set(B, Math.min(4, letter + 1));
+      else it.depth.set(B, base);
+    }
+  }
+  // Where each entry starts and ends (sentence numbers), and its pages.
+  for (const it of out) {
+    if (it.kind === 'head') { it.i0 = it.B.s0; it.label = textOf(it.B); it.p0 = it.p1 = it.B.p; continue; }
+    if (it.zone === 'cover') { it.label = 'Cover pages'; it.p0 = 1; it.p1 = Math.max(coverPages[coverPages.length - 1] || 1, ...it.kids.map((B) => B.p)); it.i0 = 0; }
+    else {
+      it.label = 'Budget'; it.p0 = Math.min(...it.kids.map((B) => B.p)); it.p1 = Math.max(...it.kids.map((B) => B.p));
+      while (budget.has(it.p1 + 1)) it.p1++;
+      // Start at the top of its first page, unless a section heading of the proposal sits above it there.
+      const start = firstOn(it.p0);
+      it.i0 = out.some((o) => o.kind === 'head' && o.B.s0 >= start && o.B.s0 < it.kids[0].s0) ? it.kids[0].s0 : Math.min(start, it.kids[0].s0);
+    }
+  }
+  out.forEach((it, k) => { it.i1 = k + 1 < out.length ? Math.max(it.i0 + 1, out[k + 1].i0) : M.sents.length; it.key = 't' + k; });
+  return out;
+}
+function tocHtml(M, outline) {
+  const curSec = M.secOf[App.cur];
+  const escW = (s) => esc(s).replace(/\//g, '/<wbr>');             // "Scientific/Technical/Management" breaks after a slash
+  const meta = (p0, p1, cov) => `${p1 > p0 ? `pp. ${p0}–${p1}` : `p. ${p0}`}${cov === null ? '' : ` · ${cov}% heard`}`;
+  let html = '';
+  for (const it of outline) {
+    const here = App.cur >= it.i0 && App.cur < it.i1;
+    // A section you are in opens to show your subsection; Cover pages and Budget stay folded until tapped.
+    const n = it.kids.length, open = here && n > 0 && it.kind === 'head' && it.kids.some((B) => B.s0 === curSec);
+    const cov = heardPctOf(M, App.notes, App.S, it.i0, it.i1);
+    const tw = n ? `<button type="button" class="tw" data-tw="${it.key}" aria-expanded="${open}" aria-label="${open ? 'Hide' : 'Show'} the ${n} headings in ${esc(it.label)}"><svg class="ic" aria-hidden="true"><use href="#i-chev"/></svg></button>` : '<span class="tw-sp"></span>';
+    html += `<li class="vrow toc top${it.kind === 'group' ? ' grp' : ''}${here ? ' here' : ''}" tabindex="0" data-i="${it.i0}">${tw}<span class="vname">${escW(it.label)}</span><span class="vmeta">${meta(it.p0, it.p1, cov)}</span></li>`;
+    for (const B of it.kids) {
+      const d = Math.min(4, (it.depth && it.depth.get(B)) || 2);
+      const c = sectionCoverage(B.s0);
+      html += `<li class="vrow toc kid d${d}${B.s0 === curSec && B.s0 <= App.cur ? ' here' : ''}" tabindex="0" data-i="${B.s0}" data-kid="${it.key}"${open ? '' : ' hidden'}><span class="tw-sp"></span><span class="vname">${escW(stripMarks(M.sents[B.s0].t))}</span><span class="vmeta">p. ${B.p}${c ? ` · ${c}%` : ''}</span></li>`;
+    }
+  }
+  return html;
 }
 function openTocSheet(focusSearch) {
   const M = App.model;
-  const heads = M.blocks.filter((B) => B.k === 'h' && !B.ref);
-  const cg = coverGroup(M, heads);
-  const row = (B, sub) => {
-    const i = B.s0; const cov = sectionCoverage(i);
-    return `<li class="vrow toc lvl${sub ? 2 : B.lvl}${sub ? ' toc-sub' : ''}${i <= App.cur && (M.secOf[App.cur] === i) ? ' here' : ''}" tabindex="0" data-i="${i}"${sub ? ' hidden' : ''}><span class="vname">${esc(stripMarks(M.sents[i].t))}</span><span class="vmeta">p. ${M.sents[i].p}${cov === null ? '' : ` · ${cov}% heard`}</span></li>`;
-  };
-  let rows = '';
-  if (cg) {
-    const h = heardPctOf(M, App.notes, App.S, 0, cg.end);
-    rows += `<li class="vrow toc lvl1 toc-group${App.cur < cg.end ? ' here' : ''}" tabindex="0" data-i="0"><span class="vname">Cover pages</span><span class="vmeta">${cg.pages > 1 ? `pp. 1–${cg.pages}` : 'p. 1'}${h === null ? '' : ` · ${h}% heard`}</span></li>`;
-    rows += `<li class="toc-more"><button type="button" class="mini" data-exp="cover" aria-expanded="false">Show the ${cg.items.length} headings</button></li>`;
-    rows += cg.items.map((B) => row(B, true)).join('');
-  }
-  rows += heads.filter((B) => !cg || B.p > cg.pages).map((B) => row(B, false)).join('');
+  const outline = tocOutline(M);
+  const foldable = outline.some((it) => it.kids.length);
   const b = openSheet('Sections and search', `<div class="stack">
     <input type="search" id="findQ" placeholder="Search this proposal" autocomplete="off" aria-label="Search this proposal">
     <ul class="list" id="findRes" hidden></ul>
     <div id="tocWrap">
-      ${heads.length ? `<ul class="list">${rows}</ul>` : '<p class="hint">No section headings were found in this PDF.</p>'}
+      ${foldable ? '<div class="toc-tools"><button type="button" class="mini" data-twall="open">Expand all</button></div>' : ''}
+      ${outline.length ? `<ul class="list">${tocHtml(M, outline)}</ul>` : '<p class="hint">No section headings were found in this PDF.</p>'}
       <div class="sec-h">Pages</div>
       <div class="seg pages">${Array.from({ length: M.nPages }, (_, k) => `<button type="button" data-page="${k + 1}">${k + 1}</button>`).join('')}</div>
     </div></div>`, { tall: true });
@@ -4394,12 +4567,19 @@ function openTocSheet(focusSearch) {
   }, 180);
   b.oninput = (e) => { if (e.target.id === 'findQ') run(); };
   b.onclick = (e) => {
-    const ex = e.target.closest('[data-exp]');
-    if (ex) {
-      const open = ex.getAttribute('aria-expanded') !== 'true';
-      ex.setAttribute('aria-expanded', String(open));
-      b.querySelectorAll('.toc-sub').forEach((el) => { el.hidden = !open; });
-      ex.textContent = open ? 'Hide the headings' : `Show the ${b.querySelectorAll('.toc-sub').length} headings`;
+    const setOpen = (tw, open) => {
+      tw.setAttribute('aria-expanded', String(open));
+      tw.setAttribute('aria-label', tw.getAttribute('aria-label').replace(/^(Show|Hide)/, open ? 'Hide' : 'Show'));
+      b.querySelectorAll(`[data-kid="${tw.dataset.tw}"]`).forEach((el) => { el.hidden = !open; });
+    };
+    const tw = e.target.closest('[data-tw]');
+    if (tw) { setOpen(tw, tw.getAttribute('aria-expanded') !== 'true'); return; }
+    const all = e.target.closest('[data-twall]');
+    if (all) {
+      const open = all.dataset.twall === 'open';
+      b.querySelectorAll('[data-tw]').forEach((x) => setOpen(x, open));
+      all.dataset.twall = open ? 'close' : 'open';
+      all.textContent = open ? 'Collapse all' : 'Expand all';
       return;
     }
     const r = e.target.closest('[data-i]'); const pg = e.target.closest('[data-page]');
@@ -4752,8 +4932,8 @@ function wireUI() {
     else if (k === '-' || k === '_') setRate(App.S.rate - 0.1);
   });
   document.addEventListener('visibilitychange', () => {
-    Alive.set(!document.hidden);
-    if (document.hidden) { if (Player.playing) Player.fill(Player.gen); flushSettings(); savePos(); saveNotes(); }
+    Alive.mark();
+    if (document.hidden) { if (Player.playing) Player.fill(Player.gen); if (IS_IOS) NV.trim(); flushSettings(); savePos(); saveNotes(); }
     else if (Player.playing) { Wake.on(); setCur(App.cur, { scroll: true, keepResume: true }); }
   });
   window.addEventListener('pagehide', () => { Alive.set(false); flushSettings(); savePos(); saveNotes(); NVGuard.disarm(); });
@@ -5218,7 +5398,7 @@ async function boot() {
   Voices.init();
   Media.init();
   Diag.log(`start: build ${BUILD}; storage kept ${Store.ok}; engine ${App.S.engine}; ${IS_IOS ? 'iOS' : IS_ANDROID ? 'Android' : 'desktop'}`);
-  if (crashed) Diag.log('the previous session stopped unexpectedly while open (possibly closed by the system for memory)');
+  if (crashed) Diag.log(`the previous session stopped unexpectedly while ${Alive.last === 'p' ? 'playing with the screen off' : 'open'} (possibly closed by the system for memory)`);
   if (await NVGuard.check(crashed)) { console.warn('natural voice: the page stopped while two voice workers ran; using one from now on'); Diag.log('voice: limited to one worker after an unexpected stop with two running'); }
   NV.checkCached().then(() => onNaturalChanged());
   showScreen('lib');
