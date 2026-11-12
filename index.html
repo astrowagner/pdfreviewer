@@ -552,6 +552,19 @@ const VOCAB = {";":1,":":2,",":3,".":4,"!":5,"?":6,"—":9,"…":10,"\"":11,"(":
 const SR = 24000;
 const DB_NAME = 'pl-natural-voice';
 
+// ── Memory of the WebAssembly modules (ONNX Runtime, phonemizer), reported with each sentence ──
+// A module's memory only grows; the page logs each step up (see NV.onMsg in natural.js).
+const WasmMem = new Set();
+(() => {
+  const orig = WebAssembly.instantiate.bind(WebAssembly);
+  const note = (o) => { try { for (const v of Object.values(o || {})) { if (v instanceof WebAssembly.Memory) WasmMem.add(v); else if (v && typeof v === 'object' && !(v instanceof WebAssembly.Module)) for (const w of Object.values(v)) if (w instanceof WebAssembly.Memory) WasmMem.add(w); } } catch (e) { /* ignore */ } };
+  WebAssembly.instantiate = function (src, imports) {
+    note(imports);
+    return orig(src, imports).then((r) => { note((r && r.instance ? r.instance : r).exports); return r; });
+  };
+})();
+const wasmMB = () => { let b = 0; for (const m of WasmMem) b += m.buffer.byteLength; return Math.round(b / 1048576); };
+
 // ── Cache: IndexedDB, best effort ──────────────────────────────────────────
 const Cache = {
   db: null, tried: false,
@@ -622,7 +635,22 @@ async function getFile(f, base, opts = {}) {
   const key = f.path + '#' + f.sha256.slice(0, 16);
   const hit = await Cache.get(key);
   if (hit && hit.byteLength === f.size) { Progress.add(f.size); return hit; }
-  const res = await fetch(new URL(f.path, base).href, { cache: 'no-store' });
+  const url = new URL(f.path, base).href;
+  // First let the browser reuse its own file cache: in Safari it can outlast this page's storage, which Safari
+  // erases when it quits while the app runs inside claude.ai. The size and SHA-256 checks catch a stale or damaged
+  // copy; then the file is fetched fresh from the network.
+  let out = null, err = null;
+  for (const mode of ['force-cache', 'reload']) {
+    let got = 0;
+    try { out = await fetchChecked(url, f, mode, (n) => { got += n; Progress.add(n); }); break; }
+    catch (e) { Progress.add(-got); err = e; out = null; }
+  }
+  if (!out) throw err;
+  if (!opts.noCache) await Cache.put(key, out.buffer);
+  return out.buffer;
+}
+async function fetchChecked(url, f, mode, onBytes) {
+  const res = await fetch(url, { cache: mode });
   if (!res.ok) throw new Error(`Could not download ${f.path} (HTTP ${res.status}).`);
   const out = new Uint8Array(f.size);
   let off = 0;
@@ -631,19 +659,18 @@ async function getFile(f, base, opts = {}) {
     for (;;) {
       const { value, done } = await rd.read();
       if (done) break;
-      if (off + value.length > f.size) throw new Error(`${f.path} is larger than expected.`);
-      out.set(value, off); off += value.length; Progress.add(value.length);
+      if (off + value.length > f.size) { try { rd.cancel(); } catch (e) { /* ignore */ } throw new Error(`${f.path} is larger than expected.`); }
+      out.set(value, off); off += value.length; onBytes(value.length);
     }
   } else {
     const b = new Uint8Array(await res.arrayBuffer());
     if (b.length > f.size) throw new Error(`${f.path} is larger than expected.`);
-    out.set(b); off = b.length; Progress.add(b.length);
+    out.set(b); off = b.length; onBytes(b.length);
   }
   if (off !== f.size) throw new Error(`${f.path} downloaded incompletely (${off} of ${f.size} bytes).`);
   const h = await sha256(out);
   if (h && h !== f.sha256) throw new Error(`${f.path} failed its integrity check.`);
-  if (!opts.noCache) await Cache.put(key, out.buffer);
-  return out.buffer;
+  return out;
 }
 
 // Data files arrive wrapped in a minimal WebAssembly module (the host serves .wasm, not .bin): the header,
@@ -1010,7 +1037,7 @@ self.onmessage = (ev) => {
         await Espeak.init(esWasm, own(unwrap(esData, F.espeakData)));
         await initModel(new Uint8Array(ortWasm), model.buffer, m.sessionOptions, graph);
         const t2 = performance.now();
-        postMessage({ type: 'ready', inputs: K.inputs, outputs: K.outputs, ms: { files: Math.round(t1 - t0), init: Math.round(t2 - t1) } });
+        postMessage({ type: 'ready', inputs: K.inputs, outputs: K.outputs, ms: { files: Math.round(t1 - t0), init: Math.round(t2 - t1) }, mem: wasmMB() });
         Cache.prune(list).catch(() => {});
       } catch (e) {
         postMessage({ type: 'error', message: (e && e.message) || String(e) });
@@ -1037,7 +1064,7 @@ self.onmessage = (ev) => {
         const t2 = performance.now();
         const { y, a, b, peak } = tidyAudio(raw);
         const words = m.timing === false ? [] : await wordTimes(m.text, lang, a, b, y);
-        const out = { type: 'audio', job: m.job, sr: SR, dur: y.length / SR, peak, phonemes: ps, words, ms: { phon: Math.round(t1 - t0), model: Math.round(t2 - t1), total: Math.round(performance.now() - t0) } };
+        const out = { type: 'audio', job: m.job, sr: SR, dur: y.length / SR, peak, phonemes: ps, words, ms: { phon: Math.round(t1 - t0), model: Math.round(t2 - t1), total: Math.round(performance.now() - t0) }, mem: wasmMB() };
         if (m.raw) { out.samples = y; postMessage(out, [y.buffer]); }
         else { out.wav = wav16(y); postMessage(out, [out.wav]); }
       } catch (e) {
@@ -1941,7 +1968,7 @@ const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = se
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const reduceMotion = () => !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
 class UserError extends Error {}
-const BUILD = "2026-11-12 03:05 UTC, 9aa3f09";
+const BUILD = "2026-11-12 05:15 UTC, ad3a341";
 // Diagnostic log kept on this device (localStorage) so problems on a phone can be reported.
 // It holds events, counts, sizes, and timings only: never proposal text or file names.
 const Diag = {
@@ -2327,6 +2354,7 @@ const Player = {
   play(from = App.cur, fromChar = 0) {
     if (!App.model) return;
     if (useNatural()) { NPlay.play(from, fromChar); return; }
+    if (naturalNotHere() && !this.toldNotHere) { this.toldNotHere = true; toast('The natural voice is not downloaded on this device yet. Using the device voice; turn it on under Voice (a one-time download).'); }
     if (NPlay.active) NPlay.halt();
     if (!window.speechSynthesis || typeof SpeechSynthesisUtterance === 'undefined') { toast('This browser cannot speak text.'); return; }
     const i = nextPlayable(from, 1);
@@ -2557,6 +2585,10 @@ const NV = {
   man: undefined, state: 'off', error: '', prog: null, cached: null,
   slots: [], queue: [], jobs: new Map(), seq: 0, clips: new Map(), bytes: 0, loads: new Map(), prepKeys: null,
   stats: { gen: 0, audio: 0 }, url: null, readyP: null, single: false, wasReady: false,
+  sessionOptions: undefined,                    // ONNX Runtime session options for the workers (undefined: its defaults;
+                                                // code/measure_voice_memory.mjs compares settings)
+  // WebAssembly memory of the largest worker, in MB, as the workers report it (0 until known).
+  memMB() { return this.slots.reduce((m, s) => Math.max(m, s.mem || 0), 0); },
 
   manifest() {
     if (this.man === undefined) { try { this.man = JSON.parse($id('src-ttsman').textContent); } catch (e) { this.man = null; } }
@@ -2633,7 +2665,7 @@ const NV = {
     this.readyP = slot.ready.then(() => {
       this.state = 'ready'; this.cached = true; this.prog = null; this.wasReady = true; this.changed(); this.pump();
       if (typeof NPlay !== 'undefined') NPlay.retriedStart = false;
-      Diag.log(`voice: ready in ${Math.round(performance.now() - t0)} ms`);
+      Diag.log(`voice: ready in ${Math.round(performance.now() - t0)} ms; memory ${this.memMB()} MB`);
       NPlay.warm();
       this.idleSoon();
     }, (e) => { this.fail(e); throw e; });
@@ -2646,7 +2678,7 @@ const NV = {
     slot.ready.catch(() => {});                 // failures are handled in onMsg/onCrash (a helper's is not awaited)
     slot.w.onmessage = (e) => this.onMsg(slot, e.data || {});
     slot.w.onerror = (e) => { if (e && e.preventDefault) e.preventDefault(); this.onCrash(slot, new Error((e && e.message) || 'The voice engine stopped.')); };
-    slot.w.postMessage({ type: 'init', base: document.baseURI, files: this.manifest().files });
+    slot.w.postMessage({ type: 'init', base: document.baseURI, files: this.manifest().files, sessionOptions: this.sessionOptions });
     this.slots.push(slot);
     return slot;
   },
@@ -2656,7 +2688,7 @@ const NV = {
     NVGuard.off();
     if (this.state === 'off' && !this.slots.length) return;
     Diag.log('voice: unloaded (' + why + ')');
-    if (NPlay.prep) { Diag.log(`voice: stopped preparing ahead (${why}; ${NPlay.prep.done} of ${NPlay.prep.total} done)`); NPlay.prep = null; this.prepKeys = null; }
+    if (NPlay.prep) { Diag.log(`voice: stopped preparing ahead (${why}; ${NPlay.prep.done} of ${NPlay.prep.total} done)`); NPlay.prep = null; this.prepKeys = null; PrepMark.clear(); }
     for (const s of this.slots) { clearTimeout(s.timer); try { s.w.terminate(); } catch (e) { /* ignore */ } }
     this.slots = []; this.readyP = null; this.prog = null; this.growing = false;
     const all = [...this.queue, ...this.jobs.values()];
@@ -2719,7 +2751,7 @@ const NV = {
     if (m.type === 'progress') {
       if (this.state === 'loading' && slot === this.slots[0] && m.phase !== 'voice') { this.prog = { phase: m.phase, done: m.done, total: m.total }; this.changed(); }
     } else if (m.type === 'ready') {
-      slot.ok = true; slot.res(); this.pump();
+      slot.ok = true; slot.mem = m.mem || 0; slot.res(); this.pump();
     } else if (m.type === 'error') {
       const e = new Error(m.message);
       if (slot === this.slots[0] && this.state === 'loading') slot.rej(e);
@@ -2729,6 +2761,10 @@ const NV = {
     } else if (m.type === 'audio' || m.type === 'synth-error') {
       const j = this.jobs.get(m.job);
       this.jobs.delete(m.job); slot.job = null; clearTimeout(slot.timer);
+      if (m.mem) {
+        if (slot.mem && m.mem >= slot.mem + 16) Diag.log(`voice: memory ${slot.mem} → ${m.mem} MB (a sentence of ${j ? j.text.length : '?'} characters)`);
+        slot.mem = m.mem;
+      }
       if (m.type === 'synth-error') Diag.log('voice: sentence failed: ' + m.message);
       if (j) {
         if (m.type === 'audio') j.resolve(this.addClip(j, m));
@@ -2805,7 +2841,7 @@ const NV = {
     this.clips.set(c.key, c); this.bytes += c.bytes;
     if (m.ms && m.dur > 0) {
       this.stats.gen += m.ms.total / 1000; this.stats.audio += m.dur * j.speed; this.stats.n = (this.stats.n || 0) + 1;
-      if (this.stats.n === 3 || this.stats.n % 25 === 0) Diag.log(`voice: ${this.stats.n} sentences; ${(this.stats.gen / this.stats.audio).toFixed(2)} s of work per s of speech; ${this.slots.length} worker(s); last ${m.ms.total} ms for ${m.dur.toFixed(1)} s`);
+      if (this.stats.n === 3 || this.stats.n % 25 === 0) Diag.log(`voice: ${this.stats.n} sentences; ${(this.stats.gen / this.stats.audio).toFixed(2)} s of work per s of speech; ${this.slots.length} worker(s); last ${m.ms.total} ms for ${m.dur.toFixed(1)} s; memory ${this.memMB()} MB`);
     }
     if (this.bytes > NV_CLIP_LIMIT) {
       for (const x of [...this.clips.values()].sort((a, b) => a.t - b.t)) {
@@ -2882,6 +2918,25 @@ const NVGuard = {
     if (!on || !crashed) return false;
     App.S.nvWorkers = 1; saveSettings();
     return true;
+  },
+};
+
+// While preparing ahead, a marker is kept on this device. If the page stops unexpectedly (Safari closes pages that
+// use too much memory), preparing continues the next time play is pressed in that proposal, twice at most in a row.
+const PrepMark = {
+  KEY: 'pl-prep', pending: null,
+  get() { try { return JSON.parse(localStorage.getItem(this.KEY) || 'null'); } catch (e) { return null; } },
+  set(id, auto) { const o = this.get(); try { localStorage.setItem(this.KEY, JSON.stringify({ id, crashes: auto && o && o.id === id ? o.crashes || 0 : 0 })); } catch (e) { /* unavailable */ } },
+  clear() { try { localStorage.removeItem(this.KEY); } catch (e) { /* unavailable */ } },
+  check(crashed) {
+    const o = this.get();
+    if (!o || !o.id) return;
+    if (!crashed) { this.clear(); return; }
+    o.crashes = (o.crashes || 0) + 1;
+    if (o.crashes > 2) { this.clear(); Diag.log('voice: not continuing to prepare ahead after repeated unexpected stops'); return; }
+    try { localStorage.setItem(this.KEY, JSON.stringify(o)); } catch (e) { /* unavailable */ }
+    this.pending = o.id;
+    Diag.log('voice: preparing ahead continues when play is pressed (the page stopped while preparing)');
   },
 };
 
@@ -2975,6 +3030,14 @@ const NPlay = {
     const P = Player;
     const i = nextPlayable(from, 1);
     if (i < 0) { toast('Nothing left to read from here.'); P.stop(); return; }
+    if (PrepMark.pending && App.doc && PrepMark.pending === App.doc.id && !this.prep) {
+      PrepMark.pending = null;
+      setTimeout(() => {
+        if (!App.doc || this.prep || Player.state !== 'playing') return;
+        // Said once the voice has loaded and preparing has started, so the loading progress does not cover it.
+        this.prepare(true).then(() => { if (this.prep) toast('Preparing ahead again: the page was closed while it was preparing.'); }, () => {});
+      }, 1500);
+    }
     if (i !== from) fromChar = 0;
     try { if (window.speechSynthesis && (speechSynthesis.speaking || speechSynthesis.pending)) speechSynthesis.cancel(); } catch (e) { /* ignore */ }
     const gen = ++P.gen;
@@ -3271,9 +3334,9 @@ const NPlay = {
   // Prepare ahead: make the speech for the rest of this proposal (from the current sentence) and keep it on this
   // device, so it later plays without waiting, also with the screen locked.
   prep: null,
-  async prepare() {
+  async prepare(auto) {
     const voice = NV.voice();
-    if (!voice || !App.model || !App.doc || this.prep) return;
+    if (!voice || !App.model || !App.doc || this.prep || naturalNotHere()) return;   // never downloads the voice by itself
     await ClipStore.open();
     if (!ClipStore.ok) { toast('This browser does not keep speech on this device here, so it cannot be prepared ahead.'); return; }
     const seen = new Set(), todo = [];
@@ -3289,6 +3352,7 @@ const NPlay = {
     const pr = this.prep = { doc: App.doc.id, voice: voice.id, keys: new Set(todo.map((t) => NV.key(t, voice))), total: todo.length, done: 0, all,
       chars: todo.reduce((s, t) => s + t.length, 0), charsDone: 0, t0: Date.now() };
     NV.prepKeys = pr.keys;
+    PrepMark.set(pr.doc, auto);
     Diag.log(`voice: preparing ${pr.total} sentences ahead`);
     Wake.on(); NV.changed();
     try { await NV.ensure(); } catch (e) { this.stopPrepare('the voice could not start'); return; }
@@ -3299,7 +3363,7 @@ const NPlay = {
     if (this.prep !== pr) return;
     pr.done++; if (!failed) pr.charsDone += text.length; else pr.failed = (pr.failed || 0) + 1;
     if (pr.done >= pr.total) {
-      this.prep = null; NV.prepKeys = null;
+      this.prep = null; NV.prepKeys = null; PrepMark.clear();
       Diag.log(`voice: prepared ahead (${pr.total} sentences in ${Math.round((Date.now() - pr.t0) / 1000)} s${pr.failed ? `, ${pr.failed} failed` : ''})`);
       if (Player.state !== 'playing') Wake.off();
       toast(pr.failed ? `Prepared, except ${plural(pr.failed, 'sentence', 'sentences')} that could not be read.` : 'The rest of this proposal is ready to play without waiting.');
@@ -3309,7 +3373,7 @@ const NPlay = {
   },
   stopPrepare(why) {
     const pr = this.prep; if (!pr) return;
-    this.prep = null; NV.prepKeys = null;
+    this.prep = null; NV.prepKeys = null; PrepMark.clear();
     Diag.log(`voice: stopped preparing ahead (${why}; ${pr.done} of ${pr.total} done)`);
     if (this.active && Player.state === 'playing') this.prefetch(this.idx); else NV.retain([]);   // drop the queued rest
     if (Player.state !== 'playing') Wake.off();
@@ -3354,7 +3418,10 @@ const NPlay = {
   },
 };
 
-const useNatural = () => App.S.engine === 'natural' && NV.supported() && NV.state !== 'error';
+// The natural voice plays only when its files are on this device (or loading): choosing it in settings that came
+// from another device does not start a 104 MB download by itself; Voice → "Download and turn on" does.
+const useNatural = () => App.S.engine === 'natural' && NV.supported() && NV.state !== 'error' && (NV.cached !== false || NV.state === 'loading' || NV.state === 'ready');
+const naturalNotHere = () => App.S.engine === 'natural' && NV.supported() && NV.state === 'off' && NV.cached === false;
 
 // ───────────────────────────────────────────────────────────────────────────
 // Proposal Listener — UI: library, reader, highlights, page view, sheets
@@ -4033,7 +4100,7 @@ function setRate(r, restart = true) {
   if (restart) Player.restart();
 }
 function testVoice() {
-  if (App.S.engine === 'natural' && NV.supported()) { NPlay.test(); return; }
+  if (useNatural()) { NPlay.test(); return; }       // not downloaded here: the sample uses the device voice, as play does
   if (!window.speechSynthesis) return;
   const wasPlaying = Player.playing;
   if (wasPlaying) Player.pause();
@@ -4069,14 +4136,16 @@ function nvStatusHtml() {
     }
     return `<p class="hint">Ready. The voice is made on this device ahead of playback.${speed}</p>`;
   }
+  // On and downloaded, just not loaded yet (for example after the browser reloaded the page): nothing to turn on.
+  if (App.S.engine === 'natural' && NV.cached) return `<p class="hint">The natural voice is on. It loads from this device in a second or two when you press play or prepare ahead.</p>`;
   return `<div class="nv-card"><p><b>Kokoro</b> is an AI voice that runs entirely on this device, so proposal text never leaves it.</p>
-    <p class="hint">${NV.cached ? 'Already downloaded to this device.' : `One-time download of about ${mbOf(NV.downloadSize())} MB; use Wi-Fi. It needs about half a gigabyte of memory while it runs.`}</p>
+    <p class="hint">${NV.cached ? 'Already downloaded to this device.' : `${App.S.engine === 'natural' ? 'Not downloaded on this device yet. ' : ''}One-time download of about ${mbOf(NV.downloadSize())} MB; use Wi-Fi. It needs about half a gigabyte of memory while it runs.`}</p>
     <div class="row"><button type="button" class="btn primary" data-act="nv-load">${NV.cached ? 'Turn on the natural voice' : 'Download and turn on'}</button></div></div>`;
 }
 // Prepare ahead: make the rest of the proposal's speech now and keep it on this device.
 const prepText = (pi) => `Preparing ahead: ${pi.pct}% (${pi.done} of ${pi.total} sentences)${pi.left != null ? ` · about ${fmtDur(pi.left)} left` : ''}`;
 function prepHtml() {
-  if (!NV.supported() || App.S.engine !== 'natural' || !App.model) return '';
+  if (!NV.supported() || App.S.engine !== 'natural' || !App.model || naturalNotHere()) return '';   // offered once the voice is on this device
   if (!ClipStore.enabled()) return `<p class="hint">Preparing ahead needs the app at its own web address: inside claude.ai, this browser erases kept speech when it quits.</p>`;
   const pi = NPlay.prepInfo();
   if (pi) return `<div class="nv-card"><div class="nv-row"><span class="spin sm" aria-hidden="true"></span><span id="nvPrepTxt">${prepText(pi)}</span></div>
@@ -4196,7 +4265,8 @@ function onNaturalChanged() {
   }
   if (App.model && (NPlay.prep || NPlay.prepShown)) { NPlay.prepShown = !!NPlay.prep; updateProgress(); }
   if (NPlay.waiting && NV.state === 'loading' && NV.prog && Player.playing) {
-    toast(NV.prog.phase === 'download' && NV.prog.total ? `Getting the natural voice ready: ${mbOf(NV.prog.done)} of ${mbOf(NV.prog.total)} MB` : 'Getting the natural voice ready…');
+    // From this device's copy after a reload (not a new download), or downloading for the first time.
+    toast(NV.prog.phase === 'download' && NV.prog.total ? `${NV.cached ? 'Loading the natural voice from this device' : 'Downloading the natural voice'}: ${mbOf(NV.prog.done)} of ${mbOf(NV.prog.total)} MB` : 'Getting the natural voice ready…');
   }
 }
 
@@ -4688,7 +4758,7 @@ async function diagText() {
     `browser: ${navigator.userAgent}`,
     `screen: ${screen.width}x${screen.height} @${window.devicePixelRatio || 1}; cores: ${navigator.hardwareConcurrency || '?'}; memory: ${navigator.deviceMemory || '?'} GB`,
     `storage: kept between visits ${Store.ok}; ${store}`,
-    `natural voice: ${NV.state}${NV.error ? ' (' + NV.error + ')' : ''}; on this device ${NV.cached}; workers ${NV.slots.length}; work per second of speech ${r == null ? '?' : r.toFixed(2)}`,
+    `natural voice: ${NV.state}${NV.error ? ' (' + NV.error + ')' : ''}; on this device ${NV.cached}; workers ${NV.slots.length}; work per second of speech ${r == null ? '?' : r.toFixed(2)}; memory ${NV.memMB() || '?'} MB`,
     `settings: engine ${S.engine}; voice ${S.nvoice}; speed ${S.rate}; worker limit ${S.nvWorkers || 'auto'}; pdf engine ${PDF.mode || '?'}`,
     '--- log ---', ...Diag.load()].join('\n');
 }
@@ -5344,7 +5414,10 @@ async function restoreStateFromPdf(pdf, list) {
     ids.add(d.id); out.docs++; out.notes += notes.items.length;
   }
   if (j.settings && typeof j.settings === 'object') {
-    for (const k of Object.keys(DEFAULTS)) if (k in j.settings && typeof j.settings[k] === typeof DEFAULTS[k]) App.S[k] = j.settings[k];
+    // Settings that belong to this device stay as they are: the voice worker limit (an iPhone's one-worker limit
+    // would slow a computer) and whether the state file is offered automatically (it depends on the browser).
+    const local = new Set(['nvWorkers', 'autoState']);
+    for (const k of Object.keys(DEFAULTS)) if (!local.has(k) && k in j.settings && typeof j.settings[k] === typeof DEFAULTS[k]) App.S[k] = j.settings[k];
     if (App.S.lastDoc && !ids.has(App.S.lastDoc) && !(await Store.get('docs', App.S.lastDoc))) App.S.lastDoc = '';
     out.lastDoc = App.S.lastDoc;
     await flushSettings();
@@ -5424,6 +5497,7 @@ async function boot() {
   Diag.log(`start: build ${BUILD}; storage kept ${Store.ok}; engine ${App.S.engine}; ${IS_IOS ? 'iOS' : IS_ANDROID ? 'Android' : 'desktop'}`);
   if (crashed) Diag.log(`the previous session stopped unexpectedly while ${Alive.last === 'p' ? 'playing with the screen off' : 'open'} (possibly closed by the system for memory)`);
   if (await NVGuard.check(crashed)) { console.warn('natural voice: the page stopped while two voice workers ran; using one from now on'); Diag.log('voice: limited to one worker after an unexpected stop with two running'); }
+  PrepMark.check(crashed);
   NV.checkCached().then(() => onNaturalChanged());
   showScreen('lib');
   await renderLibrary();
